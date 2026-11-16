@@ -1,0 +1,40 @@
+{
+  "name": "מחשבון קו ראייה כטב\"מ - תחנה קרקעית (UAV LOS Calculator)",
+  "short_name": "UAV LOS",
+  "description": "מחשבון קו ראייה (LOS) טקטי בין תחנה קרקעית לכטב\"מ עד 200 ק\"מ, כולל עקמומיות כדה\"א RF ואופטי, אזור פרנל, ופרופיל טופוגרפי על גבי מפה טופוגרפית ואורתופוטו.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "dir": "rtl",
+  "lang": "he-IL",
+  "background_color": "#0b1118",
+  "theme_color": "#0b1118",
+  "categories": ["navigation", "utilities", "productivity"],
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

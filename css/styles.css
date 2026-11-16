@@ -1,0 +1,857 @@
+/* ==========================================================================
+   UAV LOS Calculator PWA - Tactical Flight Operations Design System
+   RTL Hebrew Layout | Full-Viewport Map + Collapsible Floating HUD Panels
+   ========================================================================== */
+
+:root {
+  --bg-obsidian: #0b1118;
+  --bg-panel: rgba(13, 21, 31, 0.88);
+  --bg-panel-solid: #0f1824;
+  --bg-card: rgba(20, 32, 46, 0.78);
+  --bg-input: rgba(10, 16, 24, 0.85);
+  --border-subtle: rgba(148, 163, 184, 0.16);
+  --border-active: rgba(14, 165, 233, 0.55);
+
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+
+  --accent-sky: #0ea5e9;
+  --accent-cyan: #38bdf8;
+  --status-clear: #10b981;
+  --status-clear-bg: rgba(16, 185, 129, 0.16);
+  --status-warn: #f59e0b;
+  --status-warn-bg: rgba(245, 158, 11, 0.16);
+  --status-block: #ef4444;
+  --status-block-bg: rgba(239, 68, 68, 0.18);
+
+  --font-sans: 'Heebo', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --shadow-panel: 0 14px 34px -6px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(148, 163, 184, 0.14);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--bg-obsidian);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* ==========================================================================
+   Map Canvas & Custom Tactical Markers
+   ========================================================================== */
+
+#app-shell {
+  position: relative;
+  width: 100vw;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  background: #091017;
+}
+
+/* Move default Leaflet zoom/scale controls neatly */
+.leaflet-control-Attribution {
+  background: rgba(11, 17, 24, 0.75) !important;
+  color: var(--text-secondary) !important;
+  font-size: 10px !important;
+  backdrop-filter: blur(6px);
+}
+.leaflet-control-attribution a {
+  color: var(--accent-cyan) !important;
+}
+.leaflet-bar {
+  border: 1px solid var(--border-subtle) !important;
+  box-shadow: var(--shadow-panel) !important;
+}
+.leaflet-bar a {
+  background-color: var(--bg-panel-solid) !important;
+  color: var(--text-primary) !important;
+  border-bottom: 1px solid var(--border-subtle) !important;
+}
+.leaflet-bar a:hover {
+  background-color: #1e293b !important;
+  color: var(--accent-cyan) !important;
+}
+
+/* Tactical Markers */
+.tactical-marker-wrapper {
+  background: transparent;
+  border: none;
+}
+
+.marker-pin {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(11, 17, 24, 0.9);
+  border: 2px solid var(--accent-sky);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.65);
+  transition: transform 0.15s ease, border-color 0.2s ease;
+  cursor: grab;
+}
+.marker-pin:hover {
+  transform: scale(1.1);
+}
+.marker-pin.gcs-pin {
+  border-color: var(--accent-sky);
+}
+.marker-pin.uav-pin.status-CLEAR {
+  border-color: var(--status-clear);
+}
+.marker-pin.uav-pin.status-WARNING {
+  border-color: var(--status-warn);
+}
+.marker-pin.uav-pin.status-BLOCKED {
+  border-color: var(--status-block);
+}
+
+.marker-label-tag {
+  position: absolute;
+  top: -24px;
+  white-space: nowrap;
+  background: rgba(11, 17, 24, 0.92);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.obstacle-marker-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--status-block);
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.9);
+}
+
+.hover-sample-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.9);
+}
+
+/* ==========================================================================
+   Top Floating Tactical HUD Bar (Map Switcher & Quick Controls)
+   ========================================================================== */
+
+.top-hud-bar {
+  position: absolute;
+  top: max(12px, env(safe-area-inset-top));
+  left: 12px;
+  z-index: 500;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100vw - 410px);
+  pointer-events: none;
+}
+
+.hud-pill {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-panel);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 5px 8px;
+  box-shadow: var(--shadow-panel);
+}
+
+.segmented-group {
+  display: inline-flex;
+  background: rgba(8, 13, 20, 0.75);
+  border-radius: 7px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.seg-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 5px 11px;
+  border-radius: 5px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.16s ease;
+  white-space: nowrap;
+}
+
+.seg-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.seg-btn.active {
+  background: var(--accent-sky);
+  color: #061018;
+  font-weight: 700;
+}
+
+.hud-action-btn {
+  appearance: none;
+  border: 1px solid var(--border-subtle);
+  background: rgba(20, 32, 46, 0.85);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 11px;
+  border-radius: 7px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+}
+
+.hud-action-btn:hover {
+  border-color: var(--accent-cyan);
+  background: rgba(14, 165, 233, 0.18);
+}
+
+.hud-action-btn.install-btn {
+  border-color: rgba(16, 185, 129, 0.5);
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+}
+
+.dem-badge {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 4px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.dem-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--status-clear);
+}
+.dem-dot.offline {
+  background: var(--status-warn);
+}
+
+/* ==========================================================================
+   Collapsible Floating Parameters Menu (#floating-params-panel)
+   ========================================================================== */
+
+.floating-params-panel {
+  position: absolute;
+  top: max(12px, env(safe-area-inset-top));
+  right: 12px;
+  width: 375px;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 258px);
+  z-index: 600;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-panel);
+  transition: max-height 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+              width 0.25s ease,
+              transform 0.25s ease;
+  overflow: hidden;
+}
+
+/* When bottom profile drawer is collapsed, allow floating menu more vertical space */
+body.profile-collapsed .floating-params-panel {
+  max-height: calc(100dvh - 82px);
+}
+
+/* Collapsed state of Floating Parameters Menu */
+.floating-params-panel.is-collapsed {
+  max-height: 62px;
+  width: 355px;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 14px;
+  background: rgba(10, 16, 24, 0.72);
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.floating-params-panel.is-collapsed .panel-header {
+  border-bottom-color: transparent;
+}
+
+.brand-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.brand-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  flex-shrink: 0;
+}
+
+.brand-title {
+  font-size: 14.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.brand-subtitle {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-badge {
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 99px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.status-badge.CLEAR {
+  background: var(--status-clear-bg);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+}
+.status-badge.WARNING {
+  background: var(--status-warn-bg);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+.status-badge.BLOCKED {
+  background: var(--status-block-bg);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+}
+
+.collapse-toggle-btn {
+  appearance: none;
+  border: 1px solid var(--border-subtle);
+  background: rgba(30, 41, 59, 0.65);
+  color: var(--text-primary);
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.25s ease;
+}
+.collapse-toggle-btn:hover {
+  background: rgba(14, 165, 233, 0.22);
+  border-color: var(--accent-cyan);
+}
+.floating-params-panel.is-collapsed .collapse-toggle-btn svg {
+  transform: rotate(180deg);
+}
+
+/* Scrollable body inside Floating Parameters Menu */
+.panel-body {
+  overflow-y: auto;
+  padding: 10px 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: #334155 transparent;
+}
+
+.floating-params-panel.is-collapsed .panel-body {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Parameter Section Cards */
+.param-section {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.section-header {
+  width: 100%;
+  appearance: none;
+  border: none;
+  background: rgba(15, 23, 36, 0.65);
+  color: var(--text-primary);
+  padding: 8px 11px;
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.param-section.sec-collapsed .section-header {
+  border-bottom-color: transparent;
+}
+.param-section.sec-collapsed .section-content {
+  display: none;
+}
+
+.section-title-group {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.section-badge {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent-cyan);
+  background: rgba(14, 165, 233, 0.12);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.section-content {
+  padding: 10px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+/* Mode Selector Grid (RF vs Optical) */
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+
+.mode-btn {
+  appearance: none;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.15s ease;
+}
+.mode-btn:hover {
+  color: var(--text-primary);
+  border-color: rgba(148, 163, 184, 0.35);
+}
+.mode-btn.active {
+  background: rgba(14, 165, 233, 0.18);
+  border-color: var(--accent-sky);
+  color: #38bdf8;
+}
+
+.helper-note {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  background: rgba(11, 17, 24, 0.55);
+  padding: 6px 8px;
+  border-radius: 6px;
+  border-right: 2px solid var(--accent-sky);
+}
+
+/* Form Rows & Inputs */
+.field-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.field-label-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.field-val-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-cyan);
+  direction: ltr;
+}
+
+.input-with-unit {
+  display: flex;
+  align-items: center;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  overflow: hidden;
+  transition: border-color 0.15s ease;
+}
+.input-with-unit:focus-within {
+  border-color: var(--accent-sky);
+}
+
+.num-input {
+  width: 100%;
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  padding: 6px 8px;
+  outline: none;
+  direction: ltr;
+  text-align: left;
+}
+
+.unit-tag {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 0 7px;
+  background: rgba(255, 255, 255, 0.03);
+  border-right: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+
+/* Range Sliders */
+.slider-combo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tactical-slider {
+  flex: 1;
+  appearance: none;
+  height: 5px;
+  background: #1e293b;
+  border-radius: 99px;
+  outline: none;
+  cursor: pointer;
+}
+.tactical-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--accent-sky);
+  border: 2px solid #f8fafc;
+  cursor: pointer;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.5);
+}
+
+/* Quick Chips / Presets */
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.preset-chip {
+  appearance: none;
+  border: 1px solid var(--border-subtle);
+  background: rgba(15, 23, 36, 0.8);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.14s ease;
+  direction: ltr;
+}
+.preset-chip:hover {
+  border-color: var(--accent-cyan);
+  color: var(--text-primary);
+}
+.preset-chip.active {
+  background: rgba(14, 165, 233, 0.2);
+  border-color: var(--accent-sky);
+  color: var(--accent-cyan);
+}
+
+/* Action Buttons inside Panel */
+.panel-btn-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.btn-tactical {
+  flex: 1;
+  appearance: none;
+  border: 1px solid var(--border-subtle);
+  background: rgba(30, 41, 59, 0.75);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+}
+.btn-tactical:hover {
+  border-color: var(--accent-cyan);
+  background: rgba(14, 165, 233, 0.18);
+}
+.btn-tactical.primary {
+  background: rgba(14, 165, 233, 0.22);
+  border-color: var(--accent-sky);
+  color: #38bdf8;
+}
+.btn-tactical.danger {
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+}
+
+/* ==========================================================================
+   Bottom Collapsible Elevation Profile & Telemetry Drawer (#profile-drawer)
+   ========================================================================== */
+
+.profile-drawer {
+  position: absolute;
+  bottom: max(10px, env(safe-area-inset-bottom));
+  left: 12px;
+  right: 12px;
+  height: 232px;
+  z-index: 550;
+  background: var(--bg-panel);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-panel);
+  display: flex;
+  flex-direction: column;
+  transition: height 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+  overflow: hidden;
+}
+
+.profile-drawer.is-collapsed {
+  height: 50px;
+}
+
+.drawer-top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  background: rgba(10, 16, 24, 0.75);
+  border-bottom: 1px solid var(--border-subtle);
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.telemetry-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex: 1;
+}
+.telemetry-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.kpi-item {
+  display: flex;
+  flex-direction: column;
+  padding: 2px 9px;
+  background: rgba(20, 32, 46, 0.72);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  min-width: max-content;
+}
+
+.kpi-label {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.kpi-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+  direction: ltr;
+}
+.kpi-value.clear {
+  color: #34d399;
+}
+.kpi-value.warn {
+  color: #fbbf24;
+}
+.kpi-value.block {
+  color: #f87171;
+}
+
+.drawer-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.chart-canvas-container {
+  position: relative;
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  padding: 2px 6px 4px;
+}
+
+#los-chart-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: crosshair;
+}
+
+.chart-legend-overlay {
+  position: absolute;
+  top: 6px;
+  left: 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  pointer-events: none;
+  background: rgba(11, 17, 24, 0.72);
+  padding: 2px 8px;
+  border-radius: 5px;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.legend-swatch {
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+/* ==========================================================================
+   Responsive Breakpoints (Mobile & Tablet)
+   ========================================================================== */
+
+@media (max-width: 900px) {
+  .top-hud-bar {
+    max-width: calc(100vw - 24px);
+    top: max(8px, env(safe-area-inset-top));
+    left: 8px;
+    right: 8px;
+  }
+
+  .floating-params-panel {
+    top: 58px;
+    right: 8px;
+    width: calc(100vw - 16px);
+    max-width: 390px;
+    max-height: calc(100dvh - 285px);
+  }
+
+  .floating-params-panel.is-collapsed {
+    width: auto;
+    max-width: calc(100vw - 16px);
+    height: 54px;
+    max-height: 54px;
+  }
+
+  .profile-drawer {
+    left: 8px;
+    right: 8px;
+    bottom: max(8px, env(safe-area-inset-bottom));
+    height: 210px;
+  }
+}

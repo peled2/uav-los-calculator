@@ -1,0 +1,23 @@
+{
+  "name": "uav-los-calculator",
+  "version": "1.0.0",
+  "description": "UAV Line-of-Sight (LOS) Calculator PWA between Ground Control Station (GCS) and UAV up to 200 km with RF/Optical Earth curvature, Topographic & Orthophoto maps, and Netlify configuration.",
+  "type": "module",
+  "scripts": {
+    "dev": "python3 -m http.server 8080",
+    "start": "python3 -m http.server 8080",
+    "build": "echo 'Static PWA ready for deployment'"
+  },
+  "keywords": [
+    "uav",
+    "los",
+    "line-of-sight",
+    "rf",
+    "optical",
+    "fresnel",
+    "earth-curvature",
+    "pwa",
+    "netlify"
+  ],
+  "license": "MIT"
+}
