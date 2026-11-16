@@ -1,13 +1,13 @@
-const APP_CACHE = 'uav-los-shell-v1.2';
-const TILE_CACHE = 'uav-los-tiles-v1.2';
-const ELEVATION_CACHE = 'uav-los-dem-v1.2';
+const APP_CACHE = 'uav-los-shell-v2.0';
+const TILE_CACHE = 'uav-los-tiles-v2.0';
+const TERRARIUM_CACHE = 'uav-los-terrarium-v2.0';
 
 const CORE_ASSETS = [
   '/',
   '/index.html',
   '/css/styles.css',
   '/js/los-math.js',
-  '/js/elevation-service.js',
+  '/js/viewshed-worker.js',
   '/js/chart-renderer.js',
   '/js/app.js',
   '/manifest.webmanifest',
@@ -21,27 +21,20 @@ const CORE_ASSETS = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(APP_CACHE).then((cache) => {
-      return Promise.allSettled(
-        CORE_ASSETS.map((url) =>
-          cache.add(url).catch(() => null)
-        )
-      );
-    }).then(() => self.skipWaiting())
+    caches.open(APP_CACHE).then((cache) =>
+      Promise.allSettled(
+        CORE_ASSETS.map((url) => cache.add(url).catch(() => null))
+      )
+    ).then(() => self.skipWaiting())
   );
 });
 
 self.addEventListener('activate', (event) => {
-  const allowedCaches = [APP_CACHE, TILE_CACHE, ELEVATION_CACHE];
+  const allowed = [APP_CACHE, TILE_CACHE, TERRARIUM_CACHE];
   event.waitUntil(
     caches.keys().then((keys) =>
       Promise.all(
-        keys.map((key) => {
-          if (!allowedCaches.includes(key)) {
-            return caches.delete(key);
-          }
-          return null;
-        })
+        keys.map((key) => (!allowed.includes(key) ? caches.delete(key) : null))
       )
     ).then(() => self.clients.claim())
   );
@@ -50,16 +43,13 @@ self.addEventListener('activate', (event) => {
 function isMapTile(url) {
   return (
     url.includes('opentopomap.org') ||
-    url.includes('arcgisonline.com') ||
-    url.includes('tile.openstreetmap.fr')
+    url.includes('israelhiking.osm.org.il') ||
+    url.includes('arcgisonline.com')
   );
 }
 
-function isElevationApi(url) {
-  return (
-    url.includes('api.open-meteo.com/v1/elevation') ||
-    url.includes('api.open-elevation.com')
-  );
+function isTerrariumTile(url) {
+  return url.includes('s3.amazonaws.com/elevation-tiles-prod/terrarium/');
 }
 
 self.addEventListener('fetch', (event) => {
@@ -68,7 +58,23 @@ self.addEventListener('fetch', (event) => {
 
   const url = request.url;
 
-  // Map tiles: Cache-first with background refresh
+  // AWS Terrarium SRTM DEM Tiles: Cache-First for rapid offline & repeat scans
+  if (isTerrariumTile(url)) {
+    event.respondWith(
+      caches.open(TERRARIUM_CACHE).then(async (cache) => {
+        const cached = await cache.match(request);
+        if (cached) return cached;
+        const response = await fetch(request);
+        if (response && response.status === 200) {
+          cache.put(request, response.clone());
+        }
+        return response;
+      })
+    );
+    return;
+  }
+
+  // Map Tiles (OpenTopoMap, Israel Hiking Map, Esri World Imagery)
   if (isMapTile(url)) {
     event.respondWith(
       caches.open(TILE_CACHE).then(async (cache) => {
@@ -87,27 +93,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Elevation API: Network-first with cache fallback
-  if (isElevationApi(url)) {
-    event.respondWith(
-      caches.open(ELEVATION_CACHE).then(async (cache) => {
-        try {
-          const response = await fetch(request);
-          if (response && response.ok) {
-            cache.put(request, response.clone());
-          }
-          return response;
-        } catch (err) {
-          const cached = await cache.match(request);
-          if (cached) return cached;
-          throw err;
-        }
-      })
-    );
-    return;
-  }
-
-  // App shell & assets: Network-first for HTML/JS/CSS, fallback to cache
+  // App Shell: Network-first with cache fallback
   event.respondWith(
     fetch(request)
       .then((response) => {
@@ -123,7 +109,7 @@ self.addEventListener('fetch', (event) => {
         if (request.mode === 'navigate') {
           return caches.match('/index.html');
         }
-        throw new Error('Offline and not in cache');
+        throw new Error('Offline');
       })
   );
 });
