@@ -1,12 +1,15 @@
 /**
  * UAV LOS Calculator - Main Controller for 360° Viewshed / Max Range Envelope PWA
+ * Features UTM WGS84 Station Input, OpenTopoMap + Esri Orthophoto, and 60 FPS Viewshed Engine.
  */
 
 import {
   FT_TO_M,
   initialBearingDeg,
   destinationPoint,
-  haversineDistanceKm
+  haversineDistanceKm,
+  latLonToUtm,
+  utmToLatLon
 } from './los-math.js';
 import { LosChartRenderer } from './chart-renderer.js';
 
@@ -15,7 +18,7 @@ const state = {
   panelCollapsed: false,
   drawerCollapsed: true,
 
-  // Ground Station (Default: Central Israel)
+  // Ground Station (Default: Central Israel - UTM 36N 659843 E, 3530421 N)
   lat0: 31.8980,
   lon0: 34.6910,
   hGroundM: 32,
@@ -31,10 +34,7 @@ const state = {
   curvatureMode: 'rf',
   kFactor: 4 / 3,
 
-  // Latest Viewshed Output
-  avgRangeKm: 0,
-  minRangeKm: 0,
-  maxObservedRangeKm: 0,
+  // Latest Viewshed Ray Summaries
   raySummaries: [],
 
   // Inspection Ray State
@@ -59,8 +59,9 @@ let chartRenderer = null;
 
 /**
  * Initialize Full-Viewport Leaflet Map with Strictly 2 Map Layers:
- * 1) Topographic: OpenTopoMap + Israel Hiking Map (Hebrew)
+ * 1) Topographic: OpenTopoMap ONLY (no white-background regional overlay)
  * 2) Orthophoto: Esri World Imagery + Esri Boundaries & Places
+ * Zoom (+/-) buttons removed per user specification.
  */
 function initMap() {
   map = L.map('map', {
@@ -70,23 +71,14 @@ function initMap() {
     attributionControl: true
   });
 
-  L.control.zoom({ position: 'bottomleft' }).addTo(map);
   L.control.scale({ imperial: false, metric: true, position: 'bottomleft' }).addTo(map);
 
-  // Layer 1: Topographic Map (OpenTopoMap + Israel Hiking Map Hebrew tiles)
+  // Layer 1: Topographic Map (OpenTopoMap only - seamless global coverage)
   const openTopo = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
     maxZoom: 17,
     attribution: '&copy; OpenTopoMap (CC-BY-SA)'
   });
-  const israelHikingHebrew = L.tileLayer(
-    'https://israelhiking.osm.org.il/Hebrew/Tiles/{z}/{x}/{y}.png',
-    {
-      maxNativeZoom: 16,
-      maxZoom: 18,
-      attribution: '&copy; Israel Hiking Map (OSM)'
-    }
-  );
-  topoLayerGroup = L.layerGroup([openTopo, israelHikingHebrew]);
+  topoLayerGroup = L.layerGroup([openTopo]);
 
   // Layer 2: Orthophoto Map (Esri World Imagery + Boundaries & Places)
   const esriImagery = L.tileLayer(
@@ -174,7 +166,7 @@ function initMap() {
     const pos = e.target.getLatLng();
     state.lat0 = pos.lat;
     state.lon0 = pos.lng;
-    syncInputsFromState();
+    syncUtmInputsFromState();
     drawConcentricRangeRings();
   });
 
@@ -187,7 +179,7 @@ function initMap() {
     state.lat0 = e.latlng.lat;
     state.lon0 = e.latlng.lng;
     stationMarker.setLatLng([state.lat0, state.lon0]);
-    syncInputsFromState();
+    syncUtmInputsFromState();
     drawConcentricRangeRings();
     triggerFullViewshedCalculation();
   });
@@ -220,6 +212,7 @@ function initMap() {
 
 /**
  * Draw Concentric Range Rings (50, 100, 150, and R_max km) around the Ground Station
+ * Uses `iconSize: null` and `dir="ltr"` so distance badges never overflow their dark box.
  */
 function drawConcentricRangeRings() {
   if (!ringsLayerGroup) return;
@@ -241,14 +234,14 @@ function drawConcentricRangeRings() {
       interactive: false
     }).addTo(ringsLayerGroup);
 
-    // Distance label at North (0°) of each ring
+    // Distance label at North (0°) of each ring with auto-sized badge container
     const labelPt = destinationPoint(state.lat0, state.lon0, rKm, 0);
     L.marker([labelPt.lat, labelPt.lon], {
       interactive: false,
       icon: L.divIcon({
-        className: 'station-marker-wrap',
-        iconSize: [0, 0],
-        html: `<div class="ring-label-badge">${rKm} ק"מ</div>`
+        className: 'ring-label-icon',
+        iconSize: null,
+        html: `<div class="ring-label-badge" dir="ltr">${rKm} km</div>`
       })
     }).addTo(ringsLayerGroup);
   }
@@ -264,7 +257,6 @@ function initWorker() {
     const msg = e.data;
     if (!msg || !msg.type) return;
 
-    // Fallback PNG decoding on main thread if Worker lacks OffscreenCanvas
     if (msg.type === 'DECODE_PNG_REQ') {
       const rgbaBuffer = await decodePngOnMainThread(msg.pngBuffer);
       worker.postMessage({ type: 'DECODE_PNG_RES', id: msg.id, rgbaBuffer }, [rgbaBuffer]);
@@ -293,9 +285,6 @@ function initWorker() {
       }
 
       state.hGroundM = msg.hGroundM;
-      state.avgRangeKm = msg.avgRangeKm;
-      state.minRangeKm = msg.minRangeKm;
-      state.maxObservedRangeKm = msg.maxObservedRangeKm;
       state.raySummaries = msg.raySummaries || [];
 
       renderViewshedPolygon(msg.polygonLatLons);
@@ -346,7 +335,6 @@ function renderViewshedPolygon(polygonLatLons) {
 
 /**
  * Trigger full progressive 360° Viewshed calculation in Worker
- * (Called when station position, antenna height h_ant, or curvature k changes)
  */
 function triggerFullViewshedCalculation() {
   if (!worker) return;
@@ -385,7 +373,6 @@ function triggerFast60FpsUpdate() {
 function updateInspectionRay(azimuthDeg, forceImmediate = false) {
   state.inspectAzimuthDeg = ((azimuthDeg % 360) + 360) % 360;
 
-  // Immediate visual feedback using cached raySummaries
   if (state.raySummaries.length > 0) {
     let bestRay = state.raySummaries[0];
     let minDiff = 360;
@@ -415,16 +402,13 @@ function updateInspectionRay(azimuthDeg, forceImmediate = false) {
 
     const ridgeInfo =
       bestRay.blockingDistKm > 0.1
-        ? `${bestRay.blockingDistKm.toFixed(1)} ק"מ (${Math.round(bestRay.blockingHeightM)} מ')`
-        : 'אין חסימת רכס';
-    const lockTag = state.inspectLocked ? ' [נעול 🔒]' : '';
+        ? ` | Ridge: ${bestRay.blockingDistKm.toFixed(1)} km (${Math.round(bestRay.blockingHeightM)} m)`
+        : '';
+    const lockTag = state.inspectLocked ? ' [LOCK]' : '';
     document.getElementById('ray-telemetry-text').textContent =
-      `אזימוט: ${bestRay.azimuthDeg.toFixed(1)}°${lockTag} | טווח LOS: ${bestRay.rangeKm.toFixed(
-        1
-      )} ק"מ | רכס חוסם: ${ridgeInfo}`;
+      `Az: ${bestRay.azimuthDeg.toFixed(1)}°${lockTag} | LOS: ${bestRay.rangeKm.toFixed(1)} km${ridgeInfo}`;
   }
 
-  // Throttle detailed cross-section requests during rapid mouse movement
   const now = performance.now();
   if (!forceImmediate && now - state.lastProfileReqTime < 45) return;
   state.lastProfileReqTime = now;
@@ -463,36 +447,38 @@ function renderInspectionRayGeometry(profile) {
 }
 
 /**
- * Update DOM Readouts & Collapsed Header Summary
+ * Update DOM Readouts & Collapsed Header Summary (BiDi-safe LTR formatted numbers)
  */
 function updateReadoutsUI() {
   const H0 = state.hGroundM + state.hAntM;
   const hUavM = Math.round(state.hUavFt * FT_TO_M);
+  const modeTag = state.curvatureMode === 'rf' ? 'RF' : 'OPT';
 
-  document.getElementById('readout-h-ground').textContent = `${state.hGroundM} מ'`;
-  document.getElementById('readout-h0').textContent = `${H0} מ' ASL`;
-  document.getElementById('readout-uav-m').textContent = `${hUavM.toLocaleString('en-US')} מ' ASL`;
+  document.getElementById('readout-h-ground').textContent = `${state.hGroundM} m`;
+  document.getElementById('readout-h0').textContent = `${H0} m`;
+  document.getElementById('readout-uav-m').textContent = `${hUavM.toLocaleString('en-US')} m`;
 
-  document.getElementById('stat-avg-range').textContent = `${state.avgRangeKm.toFixed(1)} ק"מ`;
-  document.getElementById('stat-minmax-range').textContent = `${state.minRangeKm.toFixed(
-    1
-  )} / ${state.maxObservedRangeKm.toFixed(1)} ק"מ`;
-
-  // Collapsed header compact summary: Aircraft altitude + Average range
   document.getElementById('collapsed-summary').textContent = `${state.hUavFt.toLocaleString(
     'en-US'
-  )} ft | ממוצע: ${state.avgRangeKm.toFixed(1)} ק"מ`;
+  )} ft | ${modeTag}`;
+}
+
+function syncUtmInputsFromState() {
+  const utm = latLonToUtm(state.lat0, state.lon0);
+  document.getElementById('input-utm-zone').value = `${utm.zone}${utm.hemisphere}`;
+  document.getElementById('input-utm-e').value = utm.easting;
+  document.getElementById('input-utm-n').value = utm.northing;
 }
 
 function syncInputsFromState() {
-  document.getElementById('input-lat').value = state.lat0.toFixed(4);
-  document.getElementById('input-lon').value = state.lon0.toFixed(4);
+  syncUtmInputsFromState();
   document.getElementById('input-h-ant').value = state.hAntM;
   document.getElementById('slider-h-ant').value = Math.min(150, state.hAntM);
   document.getElementById('input-h-uav-ft').value = state.hUavFt;
   document.getElementById('slider-h-uav-ft').value = state.hUavFt;
   document.getElementById('input-r-max').value = state.rMaxKm;
   document.getElementById('slider-r-max').value = state.rMaxKm;
+  updateReadoutsUI();
 }
 
 function toggleDrawer(forceState) {
@@ -501,7 +487,7 @@ function toggleDrawer(forceState) {
   const drawerEl = document.getElementById('cross-section-drawer');
   const btnEl = document.getElementById('toggle-drawer-btn');
   drawerEl.classList.toggle('is-collapsed', state.drawerCollapsed);
-  btnEl.textContent = state.drawerCollapsed ? 'חתך גבהים ▴' : 'סגור חתך ▾';
+  btnEl.textContent = state.drawerCollapsed ? 'פתח ▴' : 'סגור ▾';
 
   if (!state.drawerCollapsed && chartRenderer) {
     setTimeout(() => chartRenderer.render(), 250);
@@ -526,7 +512,7 @@ function bindUIEvents() {
     toggleDrawer();
   });
 
-  // Strictly 2 Map Layers: Topographic vs Orthophoto
+  // Strictly 2 Map Layers: Topographic (OpenTopoMap) vs Orthophoto (Esri)
   document.getElementById('btn-layer-topo').addEventListener('click', () => {
     state.mapType = 'topo';
     if (map.hasLayer(orthoLayerGroup)) map.removeLayer(orthoLayerGroup);
@@ -543,21 +529,28 @@ function bindUIEvents() {
     document.getElementById('btn-layer-topo').classList.remove('active');
   });
 
-  // 1. Station Lat/Lon & GPS
-  const onLatLonInput = () => {
-    const lat = parseFloat(document.getElementById('input-lat').value);
-    const lon = parseFloat(document.getElementById('input-lon').value);
-    if (Number.isFinite(lat) && Number.isFinite(lon)) {
-      state.lat0 = Math.max(-85, Math.min(85, lat));
-      state.lon0 = Math.max(-180, Math.min(180, lon));
+  // 1. Station UTM WGS84 Input (`Zone`, `E`, `N`) & GPS
+  const onUtmInput = () => {
+    const rawZone = document.getElementById('input-utm-zone').value.trim().toUpperCase();
+    const match = rawZone.match(/^(\d{1,2})\s*([NS]?)$/);
+    const zoneNum = match ? parseInt(match[1], 10) : 36;
+    const hemi = match && match[2] === 'S' ? 'S' : 'N';
+    const easting = parseFloat(document.getElementById('input-utm-e').value);
+    const northing = parseFloat(document.getElementById('input-utm-n').value);
+
+    const coords = utmToLatLon(zoneNum, hemi, easting, northing);
+    if (coords) {
+      state.lat0 = coords.lat;
+      state.lon0 = coords.lon;
       stationMarker.setLatLng([state.lat0, state.lon0]);
       map.panTo([state.lat0, state.lon0]);
       drawConcentricRangeRings();
       triggerFullViewshedCalculation();
     }
   };
-  document.getElementById('input-lat').addEventListener('change', onLatLonInput);
-  document.getElementById('input-lon').addEventListener('change', onLatLonInput);
+  document.getElementById('input-utm-zone').addEventListener('change', onUtmInput);
+  document.getElementById('input-utm-e').addEventListener('change', onUtmInput);
+  document.getElementById('input-utm-n').addEventListener('change', onUtmInput);
 
   document.getElementById('btn-gps').addEventListener('click', () => {
     if (!navigator.geolocation) return;
@@ -623,6 +616,7 @@ function bindUIEvents() {
     state.kFactor = 4 / 3;
     document.getElementById('btn-k-rf').classList.add('active');
     document.getElementById('btn-k-opt').classList.remove('active');
+    updateReadoutsUI();
     triggerFullViewshedCalculation();
   });
 
@@ -632,6 +626,7 @@ function bindUIEvents() {
     state.kFactor = 1.0;
     document.getElementById('btn-k-opt').classList.add('active');
     document.getElementById('btn-k-rf').classList.remove('active');
+    updateReadoutsUI();
     triggerFullViewshedCalculation();
   });
 

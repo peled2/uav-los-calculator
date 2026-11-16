@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <title>מחשבון מעטפת קו ראייה 360° כטב"מ – תחנה קרקעית | UAV LOS Viewshed PWA</title>
-  <meta name="description" content="חישוב וסרטוט פוליגון טווח קו ראייה (LOS) מירבי ב-360° סביב תחנה קרקעית לכטב״מ עד 200 ק״מ, מבוסס אריחי גובה AWS Terrarium SRTM, עקמומיות כדה״א RF/אופטי ומפה טופוגרפית ואורתופוטו." />
+  <title>מחשבון מעטפת LOS 360° | UAV Viewshed PWA</title>
+  <meta name="description" content="חישוב וסרטוט פוליגון טווח קו ראייה (LOS) מירבי ב-360° סביב תחנה קרקעית (UTM WGS84) לכטב״מ עד 200 ק״מ." />
   <meta name="theme-color" content="#0b1118" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -23,18 +23,15 @@
 </head>
 <body>
   <main id="app-shell">
-    <!-- 100% Full-Screen Leaflet Map -->
+    <!-- 100% Full-Screen Map -->
     <div id="map" role="application" aria-label="מפת פוליגון קו ראייה 360°"></div>
 
-    <!-- Collapsible Floating Parameters Panel (Top-Right) -->
-    <aside id="floating-panel" class="floating-panel" aria-label="תפריט פרמטרים צף מתקפל">
-      <!-- Clickable Header to Collapse / Expand -->
-      <header id="panel-header" class="panel-header" title="לחץ לצמצום או הרחבת התפריט">
+    <!-- Collapsible Floating Panel (Top-Right) -->
+    <aside id="floating-panel" class="floating-panel" aria-label="תפריט פרמטרים">
+      <header id="panel-header" class="panel-header" title="לחץ לצמצום או הרחבה">
         <div class="header-main">
-          <span class="header-title">מעטפת LOS 360°</span>
-          <span id="collapsed-summary" class="collapsed-summary">
-            10,000 ft | ממוצע: -- ק"מ
-          </span>
+          <span class="header-title">LOS 360°</span>
+          <bdi id="collapsed-summary" class="collapsed-summary" dir="ltr">10,000 ft | RF</bdi>
         </div>
         <button type="button" id="toggle-panel-btn" class="toggle-panel-btn">
           צמצם ▴
@@ -46,133 +43,128 @@
         <div class="progress-track">
           <div id="worker-progress-bar" class="progress-fill" style="width: 0%;"></div>
         </div>
-        <div id="worker-progress-text" class="progress-text">טוען נתוני גובה...</div>
+        <div id="worker-progress-text" class="progress-text">מחשב מעטפת...</div>
       </div>
 
-      <!-- Panel Body (Hidden when collapsed) -->
+      <!-- Panel Body -->
       <div class="panel-body">
-        <!-- Map Layer Switcher: Strictly Topographic & Orthophoto ONLY -->
+        <!-- Map Layer Switcher: Topographic (OpenTopoMap only) & Orthophoto -->
         <div class="control-block">
           <div class="layer-switcher" role="radiogroup" aria-label="שכבת מפה">
             <button type="button" id="btn-layer-topo" class="layer-btn active">
-              🗺️ מפה טופוגרפית
+              🗺️ טופוגרפית
             </button>
             <button type="button" id="btn-layer-ortho" class="layer-btn">
-              🛰️ מפת אורתופוטו
+              🛰️ אורתופוטו
             </button>
           </div>
         </div>
 
-        <!-- 1. Station Location (Lat, Lon) + Ground Elevation h_ground -->
+        <!-- 1. Station Location in UTM WGS84 + Ground Elevation -->
         <div class="control-block">
           <div class="block-header">
-            <span class="block-label">1. מיקום תחנה קרקעית</span>
-            <button type="button" id="btn-gps" class="gps-btn" title="מיקום נוכחי (GPS)">
+            <span class="block-label">מיקום תחנה (UTM WGS84)</span>
+            <button type="button" id="btn-gps" class="gps-btn" title="קבל מיקום GPS">
               📍 GPS
             </button>
           </div>
-          <div class="coord-grid">
-            <div class="coord-field">
-              <label for="input-lat">Lat</label>
-              <input type="number" id="input-lat" step="0.001" value="31.8980" />
+          <div class="utm-grid" dir="ltr">
+            <div class="utm-field zone-field">
+              <label for="input-utm-zone">Zone</label>
+              <input type="text" id="input-utm-zone" value="36N" maxlength="3" />
             </div>
-            <div class="coord-field">
-              <label for="input-lon">Lon</label>
-              <input type="number" id="input-lon" step="0.001" value="34.6910" />
+            <div class="utm-field">
+              <label for="input-utm-e">E</label>
+              <input type="number" id="input-utm-e" step="10" value="659843" />
+            </div>
+            <div class="utm-field">
+              <label for="input-utm-n">N</label>
+              <input type="number" id="input-utm-n" step="10" value="3530421" />
             </div>
           </div>
           <div class="sub-readout">
-            <span>גובה קרקע בתחנה (h<sub>ground</sub>):</span>
-            <strong id="readout-h-ground" class="mono-val">-- מ'</strong>
+            <span>גובה קרקע בתחנה:</span>
+            <bdi id="readout-h-ground" class="mono-val" dir="ltr">32 m</bdi>
           </div>
         </div>
 
-        <!-- 2. Antenna Height AGL (h_ant) + Total H0 -->
+        <!-- 2. Antenna Height AGL (h_ant) + Total H0 ASL -->
         <div class="control-block">
           <div class="block-header">
-            <label for="input-h-ant" class="block-label">2. גובה אנטנה מעל הקרקע (h<sub>ant</sub>)</label>
-            <span class="unit-pill">מ' AGL</span>
+            <label for="input-h-ant" class="block-label">גובה אנטנה מעל הקרקע</label>
+            <bdi class="unit-pill" dir="ltr">m AGL</bdi>
           </div>
           <div class="slider-row">
             <input type="range" id="slider-h-ant" class="range-slider" min="0" max="150" step="1" value="15" />
             <input type="number" id="input-h-ant" class="num-box" min="0" max="500" step="1" value="15" />
           </div>
           <div class="sub-readout">
-            <span>גובה אנטנה מעל פני הים (H<sub>0</sub>):</span>
-            <strong id="readout-h0" class="mono-val">-- מ' ASL</strong>
+            <span>גובה אנטנה כולל (ASL):</span>
+            <bdi id="readout-h0" class="mono-val" dir="ltr">47 m</bdi>
           </div>
         </div>
 
         <!-- 3. Aircraft Altitude in Feet (H_UAV ft ASL) + Meters Readout -->
         <div class="control-block">
           <div class="block-header">
-            <label for="input-h-uav-ft" class="block-label">3. גובה המטוס ברגל (H<sub>UAV</sub>)</label>
-            <span id="readout-uav-m" class="unit-pill">3,048 מ' ASL</span>
+            <label for="input-h-uav-ft" class="block-label">גובה כטב"מ (ASL)</label>
+            <bdi id="readout-uav-m" class="unit-pill" dir="ltr">3,048 m</bdi>
           </div>
           <div class="slider-row">
             <input type="range" id="slider-h-uav-ft" class="range-slider" min="500" max="40000" step="100" value="10000" />
-            <input type="number" id="input-h-uav-ft" class="num-box" min="500" max="40000" step="100" value="10000" />
+            <div class="num-box-with-unit" dir="ltr">
+              <input type="number" id="input-h-uav-ft" min="500" max="40000" step="100" value="10000" />
+              <span>ft</span>
+            </div>
           </div>
         </div>
 
         <!-- 4. Max Calculation Range (R_max km: 10 to 200 km) -->
         <div class="control-block">
           <div class="block-header">
-            <label for="input-r-max" class="block-label">4. טווח חישוב מירבי (R<sub>max</sub>)</label>
-            <span class="unit-pill">ק"מ</span>
+            <label for="input-r-max" class="block-label">טווח חישוב מירבי</label>
+            <bdi class="unit-pill" dir="ltr">10–200 km</bdi>
           </div>
           <div class="slider-row">
             <input type="range" id="slider-r-max" class="range-slider" min="10" max="200" step="5" value="200" />
-            <input type="number" id="input-r-max" class="num-box" min="10" max="200" step="5" value="200" />
+            <div class="num-box-with-unit" dir="ltr">
+              <input type="number" id="input-r-max" min="10" max="200" step="5" value="200" />
+              <span>km</span>
+            </div>
           </div>
         </div>
 
         <!-- 5. Earth Curvature Model: RF (k=4/3) vs Optical (k=1.0) -->
         <div class="control-block">
           <div class="block-header">
-            <span class="block-label">5. מודל עקמומיות כדור הארץ</span>
+            <span class="block-label">מודל עקמומיות כדה"א</span>
           </div>
           <div class="curvature-switcher" role="radiogroup" aria-label="מודל עקמומיות">
             <button type="button" id="btn-k-rf" class="curv-btn active">
-              <strong>RF רדיו (k = 4/3)</strong>
-              <small>R<sub>e</sub> = 8,495 ק"מ</small>
+              <strong>RF רדיו</strong>
+              <bdi dir="ltr">k = 4/3 (8,495 km)</bdi>
             </button>
             <button type="button" id="btn-k-opt" class="curv-btn">
-              <strong>אופטי גיאומטרי (k = 1.0)</strong>
-              <small>R<sub>0</sub> = 6,371 ק"מ</small>
+              <strong>אופטי</strong>
+              <bdi dir="ltr">k = 1.0 (6,371 km)</bdi>
             </button>
-          </div>
-        </div>
-
-        <!-- Summary Metrics Row -->
-        <div class="stats-footer">
-          <div class="stat-cell">
-            <span>טווח ממוצע</span>
-            <strong id="stat-avg-range">-- ק"מ</strong>
-          </div>
-          <div class="stat-cell">
-            <span>טווח מינ' / מקס'</span>
-            <strong id="stat-minmax-range">-- / -- ק"מ</strong>
           </div>
         </div>
       </div>
     </aside>
 
-    <!-- Collapsible Bottom Drawer for Ray Terrain Cross-Section (חתך גבהים לאורך קרן) -->
-    <section id="cross-section-drawer" class="cross-section-drawer is-collapsed" aria-label="מגירת חתך גבהים לאורך קרן בדיקה">
+    <!-- Collapsible Bottom Drawer for Ray Terrain Cross-Section -->
+    <section id="cross-section-drawer" class="cross-section-drawer is-collapsed" aria-label="חתך גבהים">
       <div id="drawer-header" class="drawer-header">
         <div class="drawer-info">
-          <span class="drawer-title">חתך גבהים לאורך קרן בדיקה</span>
-          <span id="ray-telemetry-text" class="ray-telemetry-text">
-            אזימוט: --° | טווח LOS: -- ק"מ | רכס חוסם: --
-          </span>
+          <span class="drawer-title">חתך גבהים</span>
+          <bdi id="ray-telemetry-text" class="ray-telemetry-text" dir="ltr">
+            Az: --° | LOS: -- km
+          </bdi>
         </div>
-        <div class="drawer-actions">
-          <span class="drawer-hint">קליק ימני במפה לנעילת קרן</span>
-          <button type="button" id="toggle-drawer-btn" class="toggle-drawer-btn">
-            חתך גבהים ▴
-          </button>
-        </div>
+        <button type="button" id="toggle-drawer-btn" class="toggle-drawer-btn">
+          פתח ▴
+        </button>
       </div>
       <div class="drawer-body">
         <canvas id="los-chart-canvas"></canvas>
@@ -180,7 +172,6 @@
     </section>
   </main>
 
-  <!-- Hidden canvas fallback if Worker lacks OffscreenCanvas -->
   <canvas id="decode-fallback-canvas" width="256" height="256" style="display: none;"></canvas>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>

@@ -1,13 +1,7 @@
 /**
  * UAV LOS Calculator - High-DPI Terrain Cross-Section & Blocking Ridge Renderer
- * Visualizes along any hovered/selected azimuth ray:
- * - Curved-Earth Terrain Cross-Section: y(d) = h(d) - d^2 / (2 * Re)
- * - Aircraft Constant-Altitude Trajectory Curve: y_UAV(d) = H_UAV - d^2 / (2 * Re)
- * - Straight Tangent LOS Ray from Station (0, H0) grazing the Blocking Ridge to r_max
- * - Shadow Zone beyond r_max
+ * Explicit LTR/RTL canvas direction handling for proper minus signs and units.
  */
-
-const M_TO_FT = 3.280839895;
 
 export class LosChartRenderer {
   constructor(canvas) {
@@ -47,7 +41,7 @@ export class LosChartRenderer {
   }
 
   _getPadding() {
-    return { top: 22, right: 20, bottom: 26, left: 58 };
+    return { top: 20, right: 18, bottom: 26, left: 60 };
   }
 
   render() {
@@ -71,10 +65,11 @@ export class LosChartRenderer {
     ctx.clearRect(0, 0, w, h);
 
     if (!this.profile || !this.profile.profileSamples || !this.profile.profileSamples.length) {
+      ctx.direction = 'rtl';
       ctx.fillStyle = '#94a3b8';
-      ctx.font = '13px "Heebo", sans-serif';
+      ctx.font = '12.5px "Heebo", sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText('רחף או לחץ על המפה סביב התחנה להצגת חתך גבהים והרכס החוסם בכיוון הנבחר', w / 2, h / 2);
+      ctx.fillText('רחף או לחץ על המפה להצגת חתך גבהים לאורך הקרן', w / 2, h / 2);
       ctx.restore();
       return;
     }
@@ -92,7 +87,6 @@ export class LosChartRenderer {
     const maxDistKm = Math.max(1, p.maxRangeKm);
     const inv2Re = 1.0 / (2.0 * p.Re);
 
-    // Compute Y range in tangent-plane effective height y = h - d^2/(2*Re)
     let minY = Math.min(0, p.H0);
     let maxY = Math.max(p.H0 + 200, p.hUavM + 200);
 
@@ -107,13 +101,14 @@ export class LosChartRenderer {
     const xToPx = (dKm) => pad.left + (dKm / maxDistKm) * plotW;
     const yToPx = (yM) => pad.top + plotH - ((yM - minY) / (maxY - minY)) * plotH;
 
-    // 1. Grid lines
+    // 1. Grid lines & LTR Numeric Labels (ensures minus sign is always on the left of the number!)
+    ctx.direction = 'ltr';
     ctx.font = '10.5px "JetBrains Mono", monospace';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     const yTicks = 4;
     for (let i = 0; i <= yTicks; i++) {
-      const valM = minY + (i / yTicks) * (maxY - minY);
+      const valM = Math.round(minY + (i / yTicks) * (maxY - minY));
       const py = yToPx(valM);
       ctx.beginPath();
       ctx.moveTo(pad.left, py);
@@ -123,24 +118,24 @@ export class LosChartRenderer {
       ctx.stroke();
 
       ctx.fillStyle = '#94a3b8';
-      ctx.fillText(`${Math.round(valM)}m`, pad.left - 6, py);
+      ctx.fillText(`${valM} m`, pad.left - 6, py);
     }
 
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     const xTicks = 5;
     for (let i = 0; i <= xTicks; i++) {
-      const dKm = (i / xTicks) * maxDistKm;
+      const dKm = Math.round((i / xTicks) * maxDistKm);
       const px = xToPx(dKm);
       ctx.beginPath();
       ctx.moveTo(px, pad.top);
       ctx.lineTo(px, pad.top + plotH);
-      ctx.strokeStyle = 'rgba(148, 163, 184, 0.1)';
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.10)';
       ctx.lineWidth = 1;
       ctx.stroke();
 
       ctx.fillStyle = '#94a3b8';
-      ctx.fillText(`${Math.round(dKm)} ק"מ`, px, pad.top + plotH + 6);
+      ctx.fillText(`${dKm} km`, px, pad.top + plotH + 6);
     }
 
     // 2. Shadow zone shading beyond rMaxKm
@@ -236,7 +231,7 @@ export class LosChartRenderer {
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
-    // 8. Hover Crosshair Tooltip
+    // 8. Hover Crosshair Tooltip (LTR isolated numbers so minus signs never flip)
     if (this.hoverIdx >= 0 && this.hoverIdx < samples.length) {
       const hs = samples[this.hoverIdx];
       const hx = xToPx(hs.distanceKm);
@@ -249,8 +244,8 @@ export class LosChartRenderer {
       ctx.stroke();
       ctx.setLineDash([]);
 
-      const boxW = 200;
-      const boxH = 54;
+      const boxW = 175;
+      const boxH = 48;
       const bx = hx + 12 + boxW > w - pad.right ? hx - boxW - 12 : hx + 12;
       const by = pad.top + 4;
       ctx.fillStyle = 'rgba(11, 17, 24, 0.92)';
@@ -260,21 +255,20 @@ export class LosChartRenderer {
       ctx.fill();
       ctx.stroke();
 
-      ctx.font = '11px "Heebo", sans-serif';
-      ctx.textAlign = 'right';
+      ctx.direction = 'ltr';
+      ctx.font = '11px "JetBrains Mono", monospace';
+      ctx.textAlign = 'left';
       ctx.fillStyle = '#f8fafc';
       ctx.fillText(
-        `מרחק: ${hs.distanceKm.toFixed(1)} ק"מ | גובה קרקע: ${hs.terrainAslM} מ'`,
-        bx + boxW - 8,
+        `Dist: ${hs.distanceKm.toFixed(1)} km | ASL: ${hs.terrainAslM} m`,
+        bx + 8,
         by + 8
       );
       ctx.fillStyle = '#38bdf8';
       ctx.fillText(
-        `שקיעת עקמומיות: -${Math.round(hs.curvatureDropM)} מ' (${Math.round(
-          hs.terrainAslM * M_TO_FT
-        )} ft)`,
-        bx + boxW - 8,
-        by + 28
+        `Drop: -${Math.round(hs.curvatureDropM)} m | Eff: ${Math.round(hs.effectiveHeightM)} m`,
+        bx + 8,
+        by + 26
       );
     }
 
