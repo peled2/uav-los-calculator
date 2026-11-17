@@ -41,7 +41,7 @@ export class LosChartRenderer {
   }
 
   _getPadding() {
-    return { top: 20, right: 18, bottom: 26, left: 60 };
+    return { top: 20, right: 18, bottom: 26, left: 68 };
   }
 
   render() {
@@ -74,6 +74,7 @@ export class LosChartRenderer {
       return;
     }
 
+    const FT_TO_M = 0.3048;
     const p = this.profile;
     const samples = p.profileSamples;
     const pad = this._getPadding();
@@ -104,14 +105,15 @@ export class LosChartRenderer {
     const xToPx = (dKm) => pad.left + (dKm / maxDistKm) * plotW;
     const yToPx = (yM) => pad.top + plotH - ((yM - minY) / (maxY - minY)) * plotH;
 
-    // 1. Grid lines & LTR Numeric Labels (ensures minus sign is always on the left of the number!)
+    // 1. Grid lines & LTR Numeric Labels in Feet (`ft`)
     ctx.direction = 'ltr';
-    ctx.font = '10.5px "JetBrains Mono", monospace';
+    ctx.font = '10px "JetBrains Mono", monospace';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     const yTicks = 4;
     for (let i = 0; i <= yTicks; i++) {
-      const valM = Math.round(minY + (i / yTicks) * (maxY - minY));
+      const valM = minY + (i / yTicks) * (maxY - minY);
+      const valFt = Math.round(valM / FT_TO_M);
       const py = yToPx(valM);
       ctx.beginPath();
       ctx.moveTo(pad.left, py);
@@ -121,7 +123,7 @@ export class LosChartRenderer {
       ctx.stroke();
 
       ctx.fillStyle = '#94a3b8';
-      ctx.fillText(`${valM} m`, pad.left - 6, py);
+      ctx.fillText(`${valFt} ft`, pad.left - 6, py);
     }
 
     ctx.textAlign = 'center';
@@ -141,11 +143,17 @@ export class LosChartRenderer {
       ctx.fillText(`${dKm} km`, px, pad.top + plotH + 6);
     }
 
-    // 2. Shadow zone shading beyond rMaxKm
-    if (p.rMaxKm < maxDistKm - 0.2) {
-      const rMaxPx = xToPx(p.rMaxKm);
-      ctx.fillStyle = 'rgba(239, 68, 68, 0.10)';
-      ctx.fillRect(rMaxPx, pad.top, pad.left + plotW - rMaxPx, plotH);
+    // 2. Multi-Zone Shadow Shading (shades only blocked wadis/valleys, leaving visible mountains clear!)
+    const intervalsKm = p.intervalsKm && p.intervalsKm.length ? p.intervalsKm : [[0, p.rMaxKm]];
+    ctx.fillStyle = 'rgba(239, 68, 68, 0.11)';
+    for (let i = 0; i < intervalsKm.length; i++) {
+      const bKm = intervalsKm[i][1];
+      const nextStartKm = i + 1 < intervalsKm.length ? intervalsKm[i + 1][0] : maxDistKm;
+      if (nextStartKm > bKm + 0.15) {
+        const x0 = xToPx(bKm);
+        const x1 = xToPx(nextStartKm);
+        ctx.fillRect(x0, pad.top, Math.max(1, x1 - x0), plotH);
+      }
     }
 
     // 3. Curved Terrain Polygon
@@ -173,47 +181,56 @@ export class LosChartRenderer {
     ctx.lineWidth = 1.6;
     ctx.stroke();
 
-    // 4. Aircraft Trajectory Curve (ASL constant vs AGL terrain-following)
-    ctx.beginPath();
-    samples.forEach((s, idx) => {
-      const dM = s.distanceKm * 1000.0;
-      const yUav = isAgl ? s.effectiveHeightM + p.hUavM : p.hUavM - dM * dM * inv2Re;
-      const px = xToPx(s.distanceKm);
-      const py = yToPx(yUav);
-      if (idx === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    });
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.65)';
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([5, 4]);
-    ctx.stroke();
+    // 4. Aircraft Trajectory Curve: Green solid where in LOS (including mountains beyond wadis!), Red dashed where blocked
+    for (let i = 1; i < samples.length; i++) {
+      const s0 = samples[i - 1];
+      const s1 = samples[i];
+      const d0 = s0.distanceKm * 1000.0;
+      const d1 = s1.distanceKm * 1000.0;
+      const y0 = isAgl ? s0.effectiveHeightM + p.hUavM : p.hUavM - d0 * d0 * inv2Re;
+      const y1 = isAgl ? s1.effectiveHeightM + p.hUavM : p.hUavM - d1 * d1 * inv2Re;
+
+      ctx.beginPath();
+      ctx.moveTo(xToPx(s0.distanceKm), yToPx(y0));
+      ctx.lineTo(xToPx(s1.distanceKm), yToPx(y1));
+      if (s1.isBlocked) {
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.65)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 4]);
+      } else {
+        ctx.strokeStyle = '#06b6d4';
+        ctx.lineWidth = 2.0;
+        ctx.setLineDash([]);
+      }
+      ctx.stroke();
+    }
     ctx.setLineDash([]);
 
-    // 5. Direct LOS Tangent Ray from Station (0, H0) to (rMaxKm, yUavAtRMax)
-    const rMaxM = p.rMaxKm * 1000.0;
-    let yUavAtRMax = p.hUavM - rMaxM * rMaxM * inv2Re;
+    // 5. Direct LOS Tangent Ray from Station (0, H0) to (outerMaxKm, yUavAtOuter)
+    const targetRangeKm = p.outerMaxKm || p.rMaxKm;
+    const targetRangeM = targetRangeKm * 1000.0;
+    let yUavAtTarget = p.hUavM - targetRangeM * targetRangeM * inv2Re;
     if (isAgl) {
-      // Interpolate effective terrain height at rMaxKm
       const stepKm = maxDistKm / Math.max(1, samples.length - 1);
-      const fIdx = Math.max(0, Math.min(samples.length - 1, p.rMaxKm / stepKm));
+      const fIdx = Math.max(0, Math.min(samples.length - 1, targetRangeKm / stepKm));
       const i0 = Math.floor(fIdx);
       const i1 = Math.min(samples.length - 1, i0 + 1);
       const frac = fIdx - i0;
       const effTerr =
         samples[i0].effectiveHeightM +
         frac * (samples[i1].effectiveHeightM - samples[i0].effectiveHeightM);
-      yUavAtRMax = effTerr + p.hUavM;
+      yUavAtTarget = effTerr + p.hUavM;
     }
     const gcsX = xToPx(0);
     const gcsY = yToPx(p.H0);
-    const endX = xToPx(p.rMaxKm);
-    const endY = yToPx(yUavAtRMax);
+    const endX = xToPx(targetRangeKm);
+    const endY = yToPx(yUavAtTarget);
 
     ctx.beginPath();
     ctx.moveTo(gcsX, gcsY);
     ctx.lineTo(endX, endY);
     ctx.strokeStyle = '#10b981';
-    ctx.lineWidth = 2.4;
+    ctx.lineWidth = 2.2;
     ctx.stroke();
 
     // 6. Blocking Ridge Marker
@@ -246,7 +263,7 @@ export class LosChartRenderer {
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
-    // 8. Hover Crosshair Tooltip (LTR isolated numbers so minus signs never flip)
+    // 8. Hover Crosshair Tooltip (All heights in Feet `ft`, LTR isolated)
     if (this.hoverIdx >= 0 && this.hoverIdx < samples.length) {
       const hs = samples[this.hoverIdx];
       const hx = xToPx(hs.distanceKm);
@@ -259,7 +276,7 @@ export class LosChartRenderer {
       ctx.stroke();
       ctx.setLineDash([]);
 
-      const boxW = 175;
+      const boxW = 195;
       const boxH = 48;
       const bx = hx + 12 + boxW > w - pad.right ? hx - boxW - 12 : hx + 12;
       const by = pad.top + 4;
@@ -270,18 +287,22 @@ export class LosChartRenderer {
       ctx.fill();
       ctx.stroke();
 
+      const terrFt = Math.round(hs.terrainAslM / FT_TO_M);
+      const minAglFt = Math.ceil((hs.reqAglM || 0) / FT_TO_M);
+      const statusTxt = hs.isBlocked ? 'BLOCKED' : 'LOS OK';
+
       ctx.direction = 'ltr';
-      ctx.font = '11px "JetBrains Mono", monospace';
+      ctx.font = '10.5px "JetBrains Mono", monospace';
       ctx.textAlign = 'left';
       ctx.fillStyle = '#f8fafc';
       ctx.fillText(
-        `Dist: ${hs.distanceKm.toFixed(1)} km | ASL: ${hs.terrainAslM} m`,
+        `Dist: ${hs.distanceKm.toFixed(1)} km | Terr: ${terrFt} ft`,
         bx + 8,
         by + 8
       );
-      ctx.fillStyle = '#38bdf8';
+      ctx.fillStyle = hs.isBlocked ? '#f87171' : '#34d399';
       ctx.fillText(
-        `Drop: -${Math.round(hs.curvatureDropM)} m | Eff: ${Math.round(hs.effectiveHeightM)} m`,
+        `Min AGL: ${minAglFt} ft (${statusTxt})`,
         bx + 8,
         by + 26
       );

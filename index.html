@@ -19,7 +19,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="/css/styles.css?v=2.5" />
+  <link rel="stylesheet" href="/css/styles.css?v=2.6" />
 </head>
 <body>
   <main id="app-shell">
@@ -37,7 +37,7 @@
       <header id="panel-header" class="panel-header" title="לחץ לצמצום או הרחבה">
         <div class="header-main">
           <span class="header-title">LOS 360°</span>
-          <bdi id="collapsed-summary" class="collapsed-summary" dir="ltr">10,000 ft | RF</bdi>
+          <bdi id="collapsed-summary" class="collapsed-summary" dir="ltr">10,000 ft ASL | RF</bdi>
         </div>
         <button type="button" id="toggle-panel-btn" class="toggle-panel-btn">
           צמצם ▴
@@ -90,7 +90,7 @@
           </div>
           <div class="sub-readout">
             <span>גובה קרקע בתחנה:</span>
-            <bdi id="readout-h-ground" class="mono-val" dir="ltr">32 m</bdi>
+            <bdi id="readout-h-ground" class="mono-val" dir="ltr">105 ft</bdi>
           </div>
         </div>
 
@@ -106,11 +106,11 @@
           </div>
           <div class="sub-readout">
             <span>גובה אנטנה כולל (ASL):</span>
-            <bdi id="readout-h0" class="mono-val" dir="ltr">47 m</bdi>
+            <bdi id="readout-h0" class="mono-val" dir="ltr">154 ft</bdi>
           </div>
         </div>
 
-        <!-- 3. Aircraft Altitude in Feet (H_UAV ft ASL / AGL) + Meters Readout -->
+        <!-- 3. Aircraft Altitude in Feet (H_UAV ft ASL / AGL) -->
         <div class="control-block">
           <div class="block-header">
             <label for="input-h-uav-ft" class="block-label">גובה כטב"מ</label>
@@ -119,7 +119,7 @@
                 <button type="button" id="btn-ref-asl" class="mini-seg-btn active">ASL</button>
                 <button type="button" id="btn-ref-agl" class="mini-seg-btn">AGL</button>
               </div>
-              <bdi id="readout-uav-m" class="unit-pill" dir="ltr">3,048 m</bdi>
+              <bdi id="readout-uav-m" class="unit-pill" dir="ltr">ft ASL</bdi>
             </div>
           </div>
           <div class="slider-row">
@@ -187,6 +187,6 @@
   <canvas id="decode-fallback-canvas" width="256" height="256" style="display: none;"></canvas>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script type="module" src="/js/app.js?v=2.5"></script>
+  <script type="module" src="/js/app.js?v=2.6"></script>
 </body>
 </html>

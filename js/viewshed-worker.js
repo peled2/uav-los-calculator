@@ -352,11 +352,24 @@ function queryZoom9PyramidMax(minPxX, maxPxX, minPxY, maxPxY, pyrLevel) {
   return maxH < -10000.0 ? 0.0 : maxH;
 }
 
+// Shared radial distance table for exact multi-zone AGL evaluation (0..200 km):
+// Indices 0..249: 60 m to 15,000 m (60 m step, Zoom 11)
+// Indices 250..1020: 15,240 m to 200,040 m (240 m step, Zoom 9)
+const NEAR_STEPS_COUNT = Math.floor(NEAR_LIMIT_M / NEAR_STEP_M); // 250
+const FAR_STEPS_COUNT = Math.ceil((200000.0 - NEAR_LIMIT_M) / FAR_STEP_M); // 771
+const TOTAL_AGL_SAMPLES = NEAR_STEPS_COUNT + FAR_STEPS_COUNT; // 1021
+const RAY_DIST_TABLE = new Float32Array(TOTAL_AGL_SAMPLES);
+for (let i = 0; i < NEAR_STEPS_COUNT; i++) {
+  RAY_DIST_TABLE[i] = (i + 1) * NEAR_STEP_M;
+}
+for (let i = 0; i < FAR_STEPS_COUNT; i++) {
+  RAY_DIST_TABLE[NEAR_STEPS_COUNT + i] = NEAR_LIMIT_M + (i + 1) * FAR_STEP_M;
+}
+
 /**
  * Compute Horizon Step List (`ridges = Float32Array([d1, h1, d2, h2, ...])`)
- * for a single azimuth ray using:
- * 1) Near range (0..15 km): Zoom 11 at 60 m step
- * 2) Far range (15..200 km): Zoom 9 with 4-level Hierarchical Ray-Boxes (BVH) and the Iron Rule!
+ * and full radial required-AGL profile (`reqAglProfile = Float32Array(TOTAL_AGL_SAMPLES)`)
+ * so that both ASL and multi-zone AGL (including mountains beyond near wadis!) are exact.
  */
 function traceRayHorizonRidges(azimuthDeg, maxRangeM) {
   const { lat0, lon0, H0, Re } = stationState;
@@ -368,183 +381,66 @@ function traceRayHorizonRidges(azimuthDeg, maxRangeM) {
   const inv2Re = 1.0 / (2.0 * Re);
 
   let alphaMax = -Infinity;
-  let maxReqAglSoFar = -Infinity;
   const ridgesList = [];
-  const aglStepsList = [];
+  const reqAglProfile = new Float32Array(TOTAL_AGL_SAMPLES);
 
   // -------------------------------------------------------------------------
   // Part 1: Near Field (60 m to 15,000 m) at 60 m step using Zoom 11 tiles
   // -------------------------------------------------------------------------
-  const nearEndM = Math.min(NEAR_LIMIT_M, maxRangeM);
-  for (let d = NEAR_STEP_M; d <= nearEndM; d += NEAR_STEP_M) {
+  for (let idx = 0; idx < NEAR_STEPS_COUNT; idx++) {
+    const d = RAY_DIST_TABLE[idx];
+    if (d > maxRangeM) break;
+
     const [lat, lon] = destinationLatLon(lat0Rad, lon0Rad, sinLat0, cosLat0, d, bearingRad);
     let h = sampleElevationAtZoom(lat, lon, 11);
     if (h === null) {
       h = sampleElevationAtZoom(lat, lon, 9) || 0.0;
     }
 
-    if (alphaMax > -Infinity) {
-      const rayBefore = H0 + d * alphaMax + d * d * inv2Re;
-      const reqBefore = Math.max(0.0, rayBefore - h);
-      if (reqBefore > maxReqAglSoFar) {
-        maxReqAglSoFar = reqBefore;
-        aglStepsList.push(d, reqBefore);
-      }
-    } else {
-      maxReqAglSoFar = 0.0;
-      aglStepsList.push(d, 0.0);
-    }
-
     const alpha = (h - H0) / d - d * inv2Re;
-    if (alpha > alphaMax) {
+    if (alpha >= alphaMax) {
       alphaMax = alpha;
       ridgesList.push(d, h);
+      reqAglProfile[idx] = 0.0;
+    } else {
+      const rayHeightAsl = H0 + d * alphaMax + d * d * inv2Re;
+      reqAglProfile[idx] = Math.max(0.0, rayHeightAsl - h);
     }
   }
 
   if (maxRangeM <= NEAR_LIMIT_M) {
     return {
       ridges: new Float32Array(ridgesList),
-      aglSteps: new Float32Array(aglStepsList)
+      reqAglProfile
     };
   }
 
   // -------------------------------------------------------------------------
-  // Part 2: Mid & Far Field (15,000 m to maxRangeM) using Hierarchical BVH Boxes
+  // Part 2: Mid & Far Field (15,240 m to maxRangeM)
+  // Evaluates exact terrain and horizon angles so both ASL ridges and multi-zone AGL
+  // (re-emerging LOS on mountains beyond wadis/valleys) are 100% captured.
   // -------------------------------------------------------------------------
-  const totalFarSteps = Math.ceil((maxRangeM - NEAR_LIMIT_M) / FAR_STEP_M);
-
-  const getStepPixelZ9 = (stepIdx) => {
-    const d = NEAR_LIMIT_M + stepIdx * FAR_STEP_M;
-    const [lat, lon] = destinationLatLon(lat0Rad, lon0Rad, sinLat0, cosLat0, d, bearingRad);
-    const gx = Math.floor(lonToTileXFloat(lon, 9) * 256.0);
-    const gy = Math.floor(latToTileYFloat(lat, 9) * 256.0);
-    return [d, gx, gy];
-  };
-
-  const traverseHierarchyBox = (stepStart, stepEnd, dStart, gxStart, gyStart, dEnd, gxEnd, gyEnd, pyrLevel) => {
-    if (pyrLevel === 0 || stepEnd - stepStart <= 1) {
-      for (let s = stepStart + 1; s <= stepEnd; s++) {
-        const [d, gx, gy] = s === stepEnd ? [dEnd, gxEnd, gyEnd] : getStepPixelZ9(s);
-        const h = queryZoom9PyramidMax(gx, gx, gy, gy, 0);
-        const alpha = (h - H0) / d - d * inv2Re;
-        if (alpha > alphaMax) {
-          alphaMax = alpha;
-          ridgesList.push(d, h);
-        }
-      }
-      return;
-    }
-
-    const minPxX = (gxStart < gxEnd ? gxStart : gxEnd) - 1;
-    const maxPxX = (gxStart > gxEnd ? gxStart : gxEnd) + 1;
-    const minPxY = (gyStart < gyEnd ? gyStart : gyEnd) - 1;
-    const maxPxY = (gyStart > gyEnd ? gyStart : gyEnd) + 1;
-
-    const hBoxMax = queryZoom9PyramidMax(minPxX, maxPxX, minPxY, maxPxY, pyrLevel);
-
-    // IRON RULE: Strict upper bound angle at the start of the box
-    const dForSlope = hBoxMax >= H0 ? dStart : dEnd;
-    const alphaUpper = (hBoxMax - H0) / dForSlope - dStart * inv2Re;
-
-    if (alphaUpper <= alphaMax) {
-      return;
-    }
-
-    const span = stepEnd - stepStart;
-    const subSpan = Math.max(1, span >> 2);
-    const nextLevel = pyrLevel - 1;
-
-    let curStep = stepStart;
-    let curD = dStart;
-    let curGx = gxStart;
-    let curGy = gyStart;
-
-    while (curStep < stepEnd) {
-      const nextStep = Math.min(stepEnd, curStep + subSpan);
-      const [nextD, nextGx, nextGy] =
-        nextStep === stepEnd ? [dEnd, gxEnd, gyEnd] : getStepPixelZ9(nextStep);
-
-      traverseHierarchyBox(
-        curStep,
-        nextStep,
-        curD,
-        curGx,
-        curGy,
-        nextD,
-        nextGx,
-        nextGy,
-        nextLevel
-      );
-
-      curStep = nextStep;
-      curD = nextD;
-      curGx = nextGx;
-      curGy = nextGy;
-    }
-  };
-
-  const SUPER_BOX_STEPS = 64;
-  let [curD, curGx, curGy] = getStepPixelZ9(0);
-
-  for (let s0 = 0; s0 < totalFarSteps; s0 += SUPER_BOX_STEPS) {
-    const s1 = Math.min(totalFarSteps, s0 + SUPER_BOX_STEPS);
-    const [nextD, nextGx, nextGy] = getStepPixelZ9(s1);
-
-    traverseHierarchyBox(s0, s1, curD, curGx, curGy, nextD, nextGx, nextGy, 3);
-
-    curD = nextD;
-    curGx = nextGx;
-    curGy = nextGy;
-  }
-
-  // -------------------------------------------------------------------------
-  // Part 3: Build Monotonic Horizon-Deficit Envelope (`aglSteps`) for 15..200 km
-  // Evaluates exact ridge peaks AND terrain every 240 m so both sharp ridges
-  // (when h_uav_agl < h_ant) and deep valleys (when terrain drops) are exact!
-  // -------------------------------------------------------------------------
-  let ridgePtr = 0;
-  let curAlphaMax = -Infinity;
-  while (ridgePtr < ridgesList.length && ridgesList[ridgePtr] <= NEAR_LIMIT_M) {
-    const rd = ridgesList[ridgePtr];
-    const rh = ridgesList[ridgePtr + 1];
-    const ra = (rh - H0) / rd - rd * inv2Re;
-    if (ra > curAlphaMax) curAlphaMax = ra;
-    ridgePtr += 2;
-  }
-
-  for (let d = NEAR_LIMIT_M + FAR_STEP_M; d <= maxRangeM; d += FAR_STEP_M) {
-    while (ridgePtr < ridgesList.length && ridgesList[ridgePtr] <= d) {
-      const rd = ridgesList[ridgePtr];
-      const rh = ridgesList[ridgePtr + 1];
-      // Before updating curAlphaMax at the ridge peak `rd`, check the required AGL
-      // right on top of this ridge relative to the previous horizon!
-      if (curAlphaMax > -Infinity) {
-        const rayBefore = H0 + rd * curAlphaMax + rd * rd * inv2Re;
-        const reqBefore = Math.max(0.0, rayBefore - rh);
-        if (reqBefore > maxReqAglSoFar) {
-          maxReqAglSoFar = reqBefore;
-          aglStepsList.push(rd, reqBefore);
-        }
-      }
-      const ra = (rh - H0) / rd - rd * inv2Re;
-      if (ra > curAlphaMax) curAlphaMax = ra;
-      ridgePtr += 2;
-    }
+  for (let idx = NEAR_STEPS_COUNT; idx < TOTAL_AGL_SAMPLES; idx++) {
+    const d = RAY_DIST_TABLE[idx];
+    if (d > maxRangeM) break;
 
     const [lat, lon] = destinationLatLon(lat0Rad, lon0Rad, sinLat0, cosLat0, d, bearingRad);
     const h = sampleElevationAtZoom(lat, lon, 9) || 0.0;
-    const rayHeightAsl = H0 + d * curAlphaMax + d * d * inv2Re;
-    const reqAgl = Math.max(0.0, rayHeightAsl - h);
-    if (reqAgl > maxReqAglSoFar) {
-      maxReqAglSoFar = reqAgl;
-      aglStepsList.push(d, reqAgl);
+
+    const alpha = (h - H0) / d - d * inv2Re;
+    if (alpha >= alphaMax) {
+      alphaMax = alpha;
+      ridgesList.push(d, h);
+      reqAglProfile[idx] = 0.0;
+    } else {
+      const rayHeightAsl = H0 + d * alphaMax + d * d * inv2Re;
+      reqAglProfile[idx] = Math.max(0.0, rayHeightAsl - h);
     }
   }
 
   return {
     ridges: new Float32Array(ridgesList),
-    aglSteps: new Float32Array(aglStepsList)
+    reqAglProfile
   };
 }
 
@@ -606,64 +502,89 @@ function solveRayMaxRangeFromRidges(ridges, hUavM, maxRangeM) {
     }
   }
 
+  const clampedR = Math.max(60.0, Math.min(maxRangeM, rMax));
   return {
-    rMaxM: Math.max(60.0, Math.min(maxRangeM, rMax)),
+    rMaxM: clampedR,
+    outerMaxM: clampedR,
+    intervals: [[0, clampedR]],
     blockingDistM,
     blockingHeightM
   };
 }
 
 /**
- * O(log K) Binary Search on `aglSteps` (`[d1, reqAgl1, d2, reqAgl2, ...]`)
- * for AGL mode (`hUavAglM` in meters above local terrain).
+ * Multi-Zone AGL Solver:
+ * Finds BOTH the primary continuous LOS range `[0, rFirstM]` AND all re-emerging LOS intervals
+ * `[a1, b1], [a2, b2], ...` over mountains beyond near wadis/valleys where `reqAgl(d) <= hUavAglM`!
  */
-function solveRayMaxRangeAgl(aglSteps, ridges, hUavAglM, maxRangeM) {
-  const numPairs = aglSteps.length >> 1;
-  if (numPairs === 0) {
-    return { rMaxM: maxRangeM, blockingDistM: 0, blockingHeightM: 0 };
-  }
+function solveRayMaxRangeAgl(reqAglProfile, ridges, hUavAglM, maxRangeM) {
+  const rawIntervals = [];
+  let inLos = true;
+  let segStart = 0.0;
+  let lastDist = 60.0;
 
-  // Binary search for first pair index `mid` where reqAgl > hUavAglM
-  let lo = 0;
-  let hi = numPairs - 1;
-  let foundIdx = -1;
+  for (let idx = 0; idx < TOTAL_AGL_SAMPLES; idx++) {
+    const d = RAY_DIST_TABLE[idx];
+    if (d > maxRangeM) {
+      if (inLos) {
+        rawIntervals.push([segStart, maxRangeM]);
+        inLos = false;
+      }
+      break;
+    }
+    lastDist = d;
+    const req = reqAglProfile[idx];
 
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    const reqAgl = aglSteps[mid * 2 + 1];
-    if (reqAgl > hUavAglM) {
-      foundIdx = mid;
-      hi = mid - 1;
+    if (inLos) {
+      if (req > hUavAglM) {
+        const dPrev = idx > 0 ? RAY_DIST_TABLE[idx - 1] : 0.0;
+        const reqPrev = idx > 0 ? reqAglProfile[idx - 1] : 0.0;
+        const span = req - reqPrev;
+        const frac = span > 0.01 ? Math.max(0.0, Math.min(1.0, (hUavAglM - reqPrev) / span)) : 0.0;
+        const dExit = Math.max(60.0, dPrev + frac * (d - dPrev));
+        rawIntervals.push([segStart, dExit]);
+        inLos = false;
+      }
     } else {
-      lo = mid + 1;
+      if (req <= hUavAglM) {
+        const dPrev = idx > 0 ? RAY_DIST_TABLE[idx - 1] : 0.0;
+        const reqPrev = idx > 0 ? reqAglProfile[idx - 1] : req;
+        const span = reqPrev - req;
+        const frac = span > 0.01 ? Math.max(0.0, Math.min(1.0, (reqPrev - hUavAglM) / span)) : 0.0;
+        segStart = dPrev + frac * (d - dPrev);
+        inLos = true;
+      }
     }
   }
 
-  if (foundIdx === -1) {
-    return { rMaxM: maxRangeM, blockingDistM: 0, blockingHeightM: 0 };
+  if (inLos) {
+    rawIntervals.push([segStart, Math.min(maxRangeM, lastDist)]);
   }
 
-  const dCurr = aglSteps[foundIdx * 2];
-  const aglCurr = aglSteps[foundIdx * 2 + 1];
-  let rMax = dCurr;
+  if (rawIntervals.length === 0) {
+    rawIntervals.push([0.0, 60.0]);
+  }
 
-  if (foundIdx > 0) {
-    const dPrev = aglSteps[(foundIdx - 1) * 2];
-    const aglPrev = aglSteps[(foundIdx - 1) * 2 + 1];
-    const spanAgl = aglCurr - aglPrev;
-    if (spanAgl > 0.01) {
-      const frac = Math.max(0.0, Math.min(1.0, (hUavAglM - aglPrev) / spanAgl));
-      rMax = dPrev + frac * (dCurr - dPrev);
+  // Merge micro-gaps (< 150 m) and filter out tiny 1-pixel noise specks (< 150 m)
+  const merged = [rawIntervals[0]];
+  for (let i = 1; i < rawIntervals.length; i++) {
+    const prev = merged[merged.length - 1];
+    const curr = rawIntervals[i];
+    if (curr[0] - prev[1] < 150.0) {
+      prev[1] = curr[1];
+    } else if (curr[1] - curr[0] >= 150.0) {
+      merged.push(curr);
     }
   }
 
-  rMax = Math.max(60.0, Math.min(maxRangeM, rMax));
+  const rFirstM = Math.max(60.0, Math.min(maxRangeM, merged[0][1]));
+  const outerMaxM = Math.max(rFirstM, Math.min(maxRangeM, merged[merged.length - 1][1]));
 
-  // Find the controlling ridge before rMax for marker/telemetry display
+  // Find the controlling ridge before the first obstruction for telemetry display
   let blockingDistM = 0;
   let blockingHeightM = 0;
   for (let i = 0; i < ridges.length; i += 2) {
-    if (ridges[i] <= rMax) {
+    if (ridges[i] <= rFirstM + 60.0) {
       blockingDistM = ridges[i];
       blockingHeightM = ridges[i + 1];
     } else {
@@ -671,11 +592,18 @@ function solveRayMaxRangeAgl(aglSteps, ridges, hUavAglM, maxRangeM) {
     }
   }
 
-  return { rMaxM: rMax, blockingDistM, blockingHeightM };
+  return {
+    rMaxM: rFirstM,
+    outerMaxM,
+    intervals: merged,
+    blockingDistM,
+    blockingHeightM
+  };
 }
 
 /**
- * Evaluate all currently cached rays for `(hUavM, maxRangeKm, altRef)` and build polygon payload
+ * Evaluate all currently cached rays for `(hUavM, maxRangeKm, altRef)` and build
+ * multi-polygon payload (primary continuous polygon + all re-emerging mountain LOS polygons beyond wadis)
  */
 function evaluatePolygonFromCachedRays(hUavM, maxRangeKm, altRef, stageLabel, isFinal) {
   const maxRangeM = maxRangeKm * 1000.0;
@@ -689,35 +617,113 @@ function evaluatePolygonFromCachedRays(hUavM, maxRangeKm, altRef, stageLabel, is
   const sortedKeys = Array.from(cachedRaysMap.keys()).sort((a, b) => a - b);
   const numRays = sortedKeys.length;
 
-  const polygonLatLons = new Array(numRays);
+  const primaryRing = new Array(numRays);
   const raySummaries = new Array(numRays);
+  const allPolygonRings = [primaryRing];
+
+  // Active ribbons for chaining secondary mountain LOS intervals `[a, b]` across adjacent azimuths
+  let activeRibbons = [];
+  const finishedRibbons = [];
 
   for (let i = 0; i < numRays; i++) {
     const rayObj = cachedRaysMap.get(sortedKeys[i]);
     const azDeg = rayObj.azimuthDeg;
-    const { rMaxM, blockingDistM, blockingHeightM } = isAgl
-      ? solveRayMaxRangeAgl(rayObj.aglSteps, rayObj.ridges, hUavM, maxRangeM)
+    const azRad = azDeg * DEG_TO_RAD;
+
+    const { rMaxM, outerMaxM, intervals, blockingDistM, blockingHeightM } = isAgl
+      ? solveRayMaxRangeAgl(rayObj.reqAglProfile, rayObj.ridges, hUavM, maxRangeM)
       : solveRayMaxRangeFromRidges(rayObj.ridges, hUavM, maxRangeM);
 
     const rKm = rMaxM / 1000.0;
-    const [lat, lon] = destinationLatLon(
-      lat0Rad,
-      lon0Rad,
-      sinLat0,
-      cosLat0,
-      rMaxM,
-      azDeg * DEG_TO_RAD
-    );
+    const [lat, lon] = destinationLatLon(lat0Rad, lon0Rad, sinLat0, cosLat0, rMaxM, azRad);
 
-    polygonLatLons[i] = [lat, lon];
+    primaryRing[i] = [lat, lon];
     raySummaries[i] = {
       azimuthDeg: azDeg,
       rangeKm: rKm,
+      outerRangeKm: outerMaxM / 1000.0,
+      intervalsKm: intervals.map(([a, b]) => [a / 1000.0, b / 1000.0]),
       lat,
       lon,
       blockingDistKm: blockingDistM / 1000.0,
       blockingHeightM
     };
+
+    if (isAgl) {
+      const secondary = intervals.length > 1 ? intervals.slice(1) : [];
+      const matchedRibbonFlags = new Array(activeRibbons.length).fill(false);
+      const nextActiveRibbons = [];
+
+      for (let s = 0; s < secondary.length; s++) {
+        const [a, b] = secondary[s];
+        // Find best overlapping active ribbon from previous ray
+        let bestIdx = -1;
+        let bestOverlap = -Infinity;
+        for (let r = 0; r < activeRibbons.length; r++) {
+          if (matchedRibbonFlags[r]) continue;
+          const rib = activeRibbons[r];
+          const overlap = Math.min(b, rib.lastB) - Math.max(a, rib.lastA);
+          if (overlap >= -500.0 && overlap > bestOverlap) {
+            bestOverlap = overlap;
+            bestIdx = r;
+          }
+        }
+
+        const ptInner = destinationLatLon(lat0Rad, lon0Rad, sinLat0, cosLat0, a, azRad);
+        const ptOuter = destinationLatLon(lat0Rad, lon0Rad, sinLat0, cosLat0, b, azRad);
+
+        if (bestIdx !== -1) {
+          matchedRibbonFlags[bestIdx] = true;
+          const rib = activeRibbons[bestIdx];
+          rib.outerPts.push(ptOuter);
+          rib.innerPts.push(ptInner);
+          rib.lastA = a;
+          rib.lastB = b;
+          rib.lastAzDeg = azDeg;
+          nextActiveRibbons.push(rib);
+        } else {
+          nextActiveRibbons.push({
+            startAzDeg: azDeg,
+            lastAzDeg: azDeg,
+            firstA: a,
+            firstB: b,
+            lastA: a,
+            lastB: b,
+            outerPts: [ptOuter],
+            innerPts: [ptInner]
+          });
+        }
+      }
+
+      for (let r = 0; r < activeRibbons.length; r++) {
+        if (!matchedRibbonFlags[r]) {
+          finishedRibbons.push(activeRibbons[r]);
+        }
+      }
+      activeRibbons = nextActiveRibbons;
+    }
+  }
+
+  if (isAgl) {
+    for (const rib of activeRibbons) {
+      finishedRibbons.push(rib);
+    }
+
+    const halfBeamRad = ((360.0 / Math.max(360, numRays)) * 0.45) * DEG_TO_RAD;
+    for (const rib of finishedRibbons) {
+      if (rib.outerPts.length >= 2) {
+        const ring = [...rib.outerPts, ...rib.innerPts.slice().reverse()];
+        allPolygonRings.push(ring);
+      } else if (rib.outerPts.length === 1 && rib.lastB - rib.lastA >= 250.0) {
+        // Single-ray mountain peak beyond a wadi: give it a narrow sector width so it is visible on map
+        const azRad = rib.lastAzDeg * DEG_TO_RAD;
+        const p1 = destinationLatLon(lat0Rad, lon0Rad, sinLat0, cosLat0, rib.lastB, azRad - halfBeamRad);
+        const p2 = destinationLatLon(lat0Rad, lon0Rad, sinLat0, cosLat0, rib.lastB, azRad + halfBeamRad);
+        const p3 = destinationLatLon(lat0Rad, lon0Rad, sinLat0, cosLat0, rib.lastA, azRad + halfBeamRad);
+        const p4 = destinationLatLon(lat0Rad, lon0Rad, sinLat0, cosLat0, rib.lastA, azRad - halfBeamRad);
+        allPolygonRings.push([p1, p2, p3, p4]);
+      }
+    }
   }
 
   return {
@@ -726,7 +732,7 @@ function evaluatePolygonFromCachedRays(hUavM, maxRangeKm, altRef, stageLabel, is
     numRays,
     hGroundM: stationState.hGroundM,
     H0: stationState.H0,
-    polygonLatLons,
+    polygonLatLons: allPolygonRings,
     raySummaries
   };
 }
@@ -775,8 +781,8 @@ async function runProgressiveViewshed(params) {
     if (jobId !== currentJobId) return;
     const azDeg = i * 1.0;
     const key = Math.round(azDeg * 4);
-    const { ridges, aglSteps } = traceRayHorizonRidges(azDeg, maxTraceM);
-    cachedRaysMap.set(key, { azimuthDeg: azDeg, ridges, aglSteps });
+    const { ridges, reqAglProfile } = traceRayHorizonRidges(azDeg, maxTraceM);
+    cachedRaysMap.set(key, { azimuthDeg: azDeg, ridges, reqAglProfile });
   }
 
   const stage1Result = evaluatePolygonFromCachedRays(hUavM, maxRangeKm, altRef, 'stage1-360', false);
@@ -794,8 +800,8 @@ async function runProgressiveViewshed(params) {
     if (jobId !== currentJobId) return;
     const azDeg = i + 0.5;
     const key = Math.round(azDeg * 4);
-    const { ridges, aglSteps } = traceRayHorizonRidges(azDeg, maxTraceM);
-    cachedRaysMap.set(key, { azimuthDeg: azDeg, ridges, aglSteps });
+    const { ridges, reqAglProfile } = traceRayHorizonRidges(azDeg, maxTraceM);
+    cachedRaysMap.set(key, { azimuthDeg: azDeg, ridges, reqAglProfile });
 
     if (i % 90 === 0) {
       self.postMessage({
@@ -817,7 +823,7 @@ async function runProgressiveViewshed(params) {
   const ranges720 = keys720.map((k) => {
     const rObj = cachedRaysMap.get(k);
     return isAgl
-      ? solveRayMaxRangeAgl(rObj.aglSteps, rObj.ridges, hUavM, maxRangeM).rMaxM
+      ? solveRayMaxRangeAgl(rObj.reqAglProfile, rObj.ridges, hUavM, maxRangeM).rMaxM
       : solveRayMaxRangeFromRidges(rObj.ridges, hUavM, maxRangeM).rMaxM;
   });
 
@@ -828,8 +834,8 @@ async function runProgressiveViewshed(params) {
       const azMid = keys720[i] / 4.0 + 0.25;
       const midKey = Math.round(azMid * 4);
       if (!cachedRaysMap.has(midKey) && midKey < 1440) {
-        const { ridges, aglSteps } = traceRayHorizonRidges(azMid, maxTraceM);
-        cachedRaysMap.set(midKey, { azimuthDeg: azMid, ridges, aglSteps });
+        const { ridges, reqAglProfile } = traceRayHorizonRidges(azMid, maxTraceM);
+        cachedRaysMap.set(midKey, { azimuthDeg: azMid, ridges, reqAglProfile });
       }
     }
   }
@@ -862,28 +868,50 @@ function buildRayCrossSectionProfile(azimuthDeg, hUavM, maxRangeKm, altRef = 'as
   const nearestKey = Math.round(normAz * 2) * 2;
   const cachedRay = cachedRaysMap.get(nearestKey % 1440);
   const rayData = cachedRay || traceRayHorizonRidges(normAz, maxDistM);
-  const { rMaxM, blockingDistM, blockingHeightM } =
+  const { rMaxM, outerMaxM, intervals, blockingDistM, blockingHeightM } =
     altRef === 'agl'
-      ? solveRayMaxRangeAgl(rayData.aglSteps, rayData.ridges, hUavM, maxDistM)
+      ? solveRayMaxRangeAgl(rayData.reqAglProfile, rayData.ridges, hUavM, maxDistM)
       : solveRayMaxRangeFromRidges(rayData.ridges, hUavM, maxDistM);
 
   const profileSamples = [];
+  let runningAlphaMax = -Infinity;
   for (let i = 0; i <= numSamples; i++) {
     const dM = i * stepM;
     let hM = hGroundM;
+    let isBlocked = false;
+    let reqAglM = 0;
+
     if (i > 0) {
       const [lat, lon] = destinationLatLon(lat0Rad, lon0Rad, sinLat0, cosLat0, dM, bearingRad);
       hM =
         dM <= NEAR_LIMIT_M
           ? sampleElevationAtZoom(lat, lon, 11) ?? sampleElevationAtZoom(lat, lon, 9) ?? 0
           : sampleElevationAtZoom(lat, lon, 9) ?? 0;
+
+      const alpha = (hM - H0) / dM - dM * inv2Re;
+      if (alpha >= runningAlphaMax) {
+        runningAlphaMax = alpha;
+        reqAglM = 0;
+      } else {
+        const rayH = H0 + dM * runningAlphaMax + dM * dM * inv2Re;
+        reqAglM = Math.max(0, rayH - hM);
+      }
+
+      if (altRef === 'agl') {
+        isBlocked = reqAglM > hUavM;
+      } else {
+        isBlocked = dM > rMaxM;
+      }
     }
+
     const dropM = dM * dM * inv2Re;
     profileSamples.push({
       distanceKm: dM / 1000.0,
       terrainAslM: Math.round(hM),
       curvatureDropM: dropM,
-      effectiveHeightM: hM - dropM
+      effectiveHeightM: hM - dropM,
+      reqAglM,
+      isBlocked
     });
   }
 
@@ -915,6 +943,8 @@ function buildRayCrossSectionProfile(azimuthDeg, hUavM, maxRangeKm, altRef = 'as
     azimuthDeg: normAz,
     maxRangeKm,
     rMaxKm: rMaxM / 1000.0,
+    outerMaxKm: outerMaxM / 1000.0,
+    intervalsKm: intervals.map(([a, b]) => [a / 1000.0, b / 1000.0]),
     endLat,
     endLon,
     blockingDistKm: blockingDistM / 1000.0,

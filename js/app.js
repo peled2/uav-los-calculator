@@ -374,7 +374,7 @@ function drawConcentricRangeRings() {
  * Initialize Web Worker (`js/viewshed-worker.js`)
  */
 function initWorker() {
-  worker = new Worker('/js/viewshed-worker.js?v=2.5');
+  worker = new Worker('/js/viewshed-worker.js?v=2.6');
 
   worker.onmessage = async (e) => {
     const msg = e.data;
@@ -438,6 +438,8 @@ function initWorker() {
       const minActiveFt = Math.ceil(minActiveM / FT_TO_M);
       const minOtherM = isAgl ? msg.minAslM : msg.minAglM;
       const minOtherFt = Math.ceil(minOtherM / FT_TO_M);
+      const targetGroundFt = Math.round(msg.targetGroundM / FT_TO_M);
+      const blockingHeightFt = Math.round(msg.blockingHeightM / FT_TO_M);
       const activeLabel = isAgl ? 'AGL (מעל הקרקע)' : 'ASL (מעל פני הים)';
       const otherLabel = isAgl ? 'ASL' : 'AGL';
 
@@ -449,19 +451,19 @@ function initWorker() {
 
       const ridgeLine =
         msg.blockingDistKm > 0.1
-          ? `<div class="point-los-row"><span>רכס חוסם:</span><span dir="ltr">${msg.blockingDistKm.toFixed(1)} km (${msg.blockingHeightM} m)</span></div>`
+          ? `<div class="point-los-row"><span>רכס חוסם:</span><span dir="ltr">${msg.blockingDistKm.toFixed(1)} km (${blockingHeightFt.toLocaleString('en-US')} ft)</span></div>`
           : '';
 
       const html = `
         <div class="point-los-card">
           <div class="point-los-header">גובה LOS מזערי בנקודה (${curvTag})</div>
-          <div class="point-los-main" dir="ltr">${minActiveFt.toLocaleString('en-US')} ft <span class="point-los-sub">(${minActiveM} m)</span></div>
+          <div class="point-los-main" dir="ltr">${minActiveFt.toLocaleString('en-US')} ft</div>
           <div class="point-los-mode-tag">${activeLabel}</div>
           ${statusHtml}
           <div class="point-los-divider"></div>
           <div class="point-los-row"><span>מרחק / אזימוט:</span><span dir="ltr">${msg.distanceKm.toFixed(1)} km | ${msg.azimuthDeg.toFixed(1)}°</span></div>
-          <div class="point-los-row"><span>גובה קרקע בנקודה:</span><span dir="ltr">${msg.targetGroundM} m ASL</span></div>
-          <div class="point-los-row"><span>מקביל (${otherLabel}):</span><span dir="ltr">${minOtherFt.toLocaleString('en-US')} ft (${minOtherM} m)</span></div>
+          <div class="point-los-row"><span>גובה קרקע בנקודה:</span><span dir="ltr">${targetGroundFt.toLocaleString('en-US')} ft ASL</span></div>
+          <div class="point-los-row"><span>מקביל (${otherLabel}):</span><span dir="ltr">${minOtherFt.toLocaleString('en-US')} ft</span></div>
           ${ridgeLine}
         </div>
       `;
@@ -560,29 +562,50 @@ function updateInspectionRay(azimuthDeg, forceImmediate = false) {
       }
     }
 
-    inspectRayLayer.setLatLngs([
-      [state.lat0, state.lon0],
-      [bestRay.lat, bestRay.lon]
-    ]);
+    const intervalsKm = bestRay.intervalsKm && bestRay.intervalsKm.length
+      ? bestRay.intervalsKm
+      : [[0, bestRay.rangeKm]];
 
-    const farEnd = destinationPoint(state.lat0, state.lon0, state.rMaxKm, bestRay.azimuthDeg);
-    if (bestRay.rangeKm < state.rMaxKm - 0.5) {
-      inspectShadowLayer.setLatLngs([
-        [bestRay.lat, bestRay.lon],
-        [farEnd.lat, farEnd.lon]
+    const visibleSegs = [];
+    const shadowSegs = [];
+
+    for (let i = 0; i < intervalsKm.length; i++) {
+      const [aKm, bKm] = intervalsKm[i];
+      const ptA = aKm <= 0.01 ? { lat: state.lat0, lon: state.lon0 } : destinationPoint(state.lat0, state.lon0, aKm, bestRay.azimuthDeg);
+      const ptB = destinationPoint(state.lat0, state.lon0, bKm, bestRay.azimuthDeg);
+      visibleSegs.push([
+        [ptA.lat, ptA.lon],
+        [ptB.lat, ptB.lon]
       ]);
-    } else {
-      inspectShadowLayer.setLatLngs([]);
+
+      const nextStartKm = i + 1 < intervalsKm.length ? intervalsKm[i + 1][0] : state.rMaxKm;
+      if (nextStartKm > bKm + 0.3) {
+        const ptNext = destinationPoint(state.lat0, state.lon0, nextStartKm, bestRay.azimuthDeg);
+        shadowSegs.push([
+          [ptB.lat, ptB.lon],
+          [ptNext.lat, ptNext.lon]
+        ]);
+      }
     }
 
+    inspectRayLayer.setLatLngs(visibleSegs);
+    inspectShadowLayer.setLatLngs(shadowSegs);
+
+    const blockingFt = Math.round(bestRay.blockingHeightM / FT_TO_M);
     const ridgeInfo =
       bestRay.blockingDistKm > 0.1
-        ? ` | Ridge: ${bestRay.blockingDistKm.toFixed(1)} km (${Math.round(bestRay.blockingHeightM)} m)`
+        ? ` | Ridge: ${bestRay.blockingDistKm.toFixed(1)} km (${blockingFt.toLocaleString('en-US')} ft)`
         : '';
     const lockTag = state.inspectLocked ? ' [LOCK]' : '';
     const refTag = state.altRef === 'agl' ? 'AGL' : 'ASL';
+    const outerKm = bestRay.outerRangeKm || bestRay.rangeKm;
+    const rangeStr =
+      outerKm > bestRay.rangeKm + 0.4
+        ? `${bestRay.rangeKm.toFixed(1)} -> ${outerKm.toFixed(1)} km`
+        : `${bestRay.rangeKm.toFixed(1)} km`;
+
     document.getElementById('ray-telemetry-text').textContent =
-      `Az: ${bestRay.azimuthDeg.toFixed(1)}°${lockTag} | LOS (${refTag}): ${bestRay.rangeKm.toFixed(1)} km${ridgeInfo}`;
+      `Az: ${bestRay.azimuthDeg.toFixed(1)}°${lockTag} | LOS (${refTag}): ${rangeStr}${ridgeInfo}`;
   }
 
   const now = performance.now();
@@ -624,17 +647,17 @@ function renderInspectionRayGeometry(profile) {
 }
 
 /**
- * Update DOM Readouts & Collapsed Header Summary (BiDi-safe LTR formatted numbers)
+ * Update DOM Readouts & Collapsed Header Summary (All elevations in ft except Antenna AGL in m)
  */
 function updateReadoutsUI() {
-  const H0 = state.hGroundM + state.hAntM;
-  const hUavM = Math.round(state.hUavFt * FT_TO_M);
+  const hGroundFt = Math.round(state.hGroundM / FT_TO_M);
+  const H0Ft = Math.round((state.hGroundM + state.hAntM) / FT_TO_M);
   const modeTag = state.curvatureMode === 'rf' ? 'RF' : 'OPT';
   const refTag = state.altRef === 'agl' ? 'AGL' : 'ASL';
 
-  document.getElementById('readout-h-ground').textContent = `${state.hGroundM} m`;
-  document.getElementById('readout-h0').textContent = `${H0} m`;
-  document.getElementById('readout-uav-m').textContent = `${hUavM.toLocaleString('en-US')} m ${refTag}`;
+  document.getElementById('readout-h-ground').textContent = `${hGroundFt.toLocaleString('en-US')} ft`;
+  document.getElementById('readout-h0').textContent = `${H0Ft.toLocaleString('en-US')} ft`;
+  document.getElementById('readout-uav-m').textContent = `ft ${refTag}`;
 
   document.getElementById('collapsed-summary').textContent = `${state.hUavFt.toLocaleString(
     'en-US'
@@ -871,7 +894,7 @@ function initServiceWorker() {
     });
     window.addEventListener('load', () => {
       navigator.serviceWorker
-        .register('/sw.js?v=2.5')
+        .register('/sw.js?v=2.6')
         .then((reg) => reg.update().catch(() => {}))
         .catch(() => {});
     });
