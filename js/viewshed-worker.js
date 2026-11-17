@@ -383,17 +383,22 @@ function traceRayHorizonRidges(azimuthDeg, maxRangeM) {
       h = sampleElevationAtZoom(lat, lon, 9) || 0.0;
     }
 
+    if (alphaMax > -Infinity) {
+      const rayBefore = H0 + d * alphaMax + d * d * inv2Re;
+      const reqBefore = Math.max(0.0, rayBefore - h);
+      if (reqBefore > maxReqAglSoFar) {
+        maxReqAglSoFar = reqBefore;
+        aglStepsList.push(d, reqBefore);
+      }
+    } else {
+      maxReqAglSoFar = 0.0;
+      aglStepsList.push(d, 0.0);
+    }
+
     const alpha = (h - H0) / d - d * inv2Re;
     if (alpha > alphaMax) {
       alphaMax = alpha;
       ridgesList.push(d, h);
-    }
-
-    const rayHeightAsl = H0 + d * alphaMax + d * d * inv2Re;
-    const reqAgl = Math.max(0.0, rayHeightAsl - h);
-    if (reqAgl > maxReqAglSoFar) {
-      maxReqAglSoFar = reqAgl;
-      aglStepsList.push(d, reqAgl);
     }
   }
 
@@ -495,8 +500,8 @@ function traceRayHorizonRidges(azimuthDeg, maxRangeM) {
 
   // -------------------------------------------------------------------------
   // Part 3: Build Monotonic Horizon-Deficit Envelope (`aglSteps`) for 15..200 km
-  // Advances through `ridgesList` while sampling terrain every 480 m so valleys
-  // and basins are never missed in AGL mode!
+  // Evaluates exact ridge peaks AND terrain every 240 m so both sharp ridges
+  // (when h_uav_agl < h_ant) and deep valleys (when terrain drops) are exact!
   // -------------------------------------------------------------------------
   let ridgePtr = 0;
   let curAlphaMax = -Infinity;
@@ -508,11 +513,20 @@ function traceRayHorizonRidges(azimuthDeg, maxRangeM) {
     ridgePtr += 2;
   }
 
-  const AGL_FAR_STEP_M = 480.0;
-  for (let d = NEAR_LIMIT_M + AGL_FAR_STEP_M; d <= maxRangeM; d += AGL_FAR_STEP_M) {
+  for (let d = NEAR_LIMIT_M + FAR_STEP_M; d <= maxRangeM; d += FAR_STEP_M) {
     while (ridgePtr < ridgesList.length && ridgesList[ridgePtr] <= d) {
       const rd = ridgesList[ridgePtr];
       const rh = ridgesList[ridgePtr + 1];
+      // Before updating curAlphaMax at the ridge peak `rd`, check the required AGL
+      // right on top of this ridge relative to the previous horizon!
+      if (curAlphaMax > -Infinity) {
+        const rayBefore = H0 + rd * curAlphaMax + rd * rd * inv2Re;
+        const reqBefore = Math.max(0.0, rayBefore - rh);
+        if (reqBefore > maxReqAglSoFar) {
+          maxReqAglSoFar = reqBefore;
+          aglStepsList.push(rd, reqBefore);
+        }
+      }
       const ra = (rh - H0) / rd - rd * inv2Re;
       if (ra > curAlphaMax) curAlphaMax = ra;
       ridgePtr += 2;

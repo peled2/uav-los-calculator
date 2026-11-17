@@ -17,6 +17,7 @@ const state = {
   mapType: 'topo', // 'topo' | 'ortho'
   panelCollapsed: false,
   drawerCollapsed: true,
+  stationMoveMode: false, // Locked by default; enabled via #btn-toggle-move-station
 
   // Ground Station (Default: Central Israel - UTM 36N 659843 E, 3530421 N)
   lat0: 31.8980,
@@ -24,8 +25,9 @@ const state = {
   hGroundM: 32,
   hAntM: 15, // Antenna AGL in meters
 
-  // Aircraft Altitude in Feet ASL (500 .. 40,000 ft)
+  // Aircraft Altitude in Feet (100 .. 40,000 ft) & Reference Mode ('asl' | 'agl')
   hUavFt: 10000,
+  altRef: 'asl',
 
   // Max Calculation Range in km (10 .. 200 km)
   rMaxKm: 200,
@@ -53,6 +55,10 @@ let polygonMainLayer = null;
 let inspectRayLayer = null;
 let inspectShadowLayer = null;
 let ridgeBlockerMarker = null;
+let pointLosPopup = null;
+let pointLosMarker = null;
+let longPressReqId = 0;
+let lastPointLosReqTime = 0;
 
 let worker = null;
 let chartRenderer = null;
@@ -68,6 +74,7 @@ function initMap() {
     center: [state.lat0, state.lon0],
     zoom: 8,
     zoomControl: false,
+    closePopupOnClick: false,
     attributionControl: true
   });
 
@@ -196,22 +203,23 @@ function initMap() {
     updateInspectionRay(az, false);
   });
 
-  // Right-click locks/unlocks the Inspection Ray and opens the Cross-Section Drawer
+  // Right-click or Mobile Native Long-Press (`contextmenu`) -> Show Point Min LOS & Lock Ray
   map.on('contextmenu', (e) => {
-    const az = initialBearingDeg(state.lat0, state.lon0, e.latlng.lat, e.latlng.lng);
-    state.inspectLocked = !state.inspectLocked;
-    if (state.inspectLocked) {
-      updateInspectionRay(az, true);
-      if (state.drawerCollapsed) {
-        toggleDrawer(false);
-      }
-    } else {
-      updateInspectionRay(az, false);
+    if (e.originalEvent) {
+      e.originalEvent.preventDefault();
     }
+    requestPointMinLos(e.latlng.lat, e.latlng.lng, false);
   });
 
-  // Long-Press (500ms hold on Touch or Mouse) -> Show Minimum LOS Altitude at exact point
+  // Custom Touch/Mouse Hold (430ms) -> Show Minimum LOS Altitude at exact point
   setupMapLongPressHandler();
+
+  map.on('popupclose', (e) => {
+    if (pointLosPopup && e.popup === pointLosPopup && pointLosMarker) {
+      map.removeLayer(pointLosMarker);
+      pointLosMarker = null;
+    }
+  });
 
   drawConcentricRangeRings();
 }
@@ -238,8 +246,8 @@ function setupMapLongPressHandler() {
       const rect = mapEl.getBoundingClientRect();
       const pt = L.point(clientX - rect.left, clientY - rect.top);
       const latlng = map.containerPointToLatLng(pt);
-      requestPointMinLos(latlng.lat, latlng.lng);
-    }, 500);
+      requestPointMinLos(latlng.lat, latlng.lng, false);
+    }, 430);
   };
 
   mapEl.addEventListener(
@@ -259,7 +267,8 @@ function setupMapLongPressHandler() {
       if (!pressTimer || e.touches.length !== 1) return;
       const dx = e.touches[0].clientX - startX;
       const dy = e.touches[0].clientY - startY;
-      if (dx * dx + dy * dy > 64) cancelLongPress();
+      // Allow up to 18px of natural finger jitter on mobile screens
+      if (dx * dx + dy * dy > 324) cancelLongPress();
     },
     { passive: true }
   );
@@ -274,22 +283,49 @@ function setupMapLongPressHandler() {
     if (!pressTimer) return;
     const dx = e.clientX - startX;
     const dy = e.clientY - startY;
-    if (dx * dx + dy * dy > 36) cancelLongPress();
+    if (dx * dx + dy * dy > 144) cancelLongPress();
   });
   mapEl.addEventListener('mouseup', cancelLongPress);
-  map.on('movestart zoomstart dragstart', cancelLongPress);
+  map.on('zoomstart', cancelLongPress);
 }
 
-function requestPointMinLos(lat, lon) {
+function requestPointMinLos(lat, lon, forceRefresh = false) {
   if (!worker) return;
+  const now = performance.now();
+  if (!forceRefresh && now - lastPointLosReqTime < 350) return;
+  lastPointLosReqTime = now;
+
   const reqId = ++longPressReqId;
+
+  if (!pointLosMarker) {
+    pointLosMarker = L.circleMarker([lat, lon], {
+      radius: 6,
+      color: '#0b1118',
+      weight: 2,
+      fillColor: '#38bdf8',
+      fillOpacity: 1.0,
+      interactive: false
+    }).addTo(map);
+  } else {
+    pointLosMarker.setLatLng([lat, lon]);
+  }
+
   if (!pointLosPopup) {
-    pointLosPopup = L.popup({ className: 'los-point-popup', maxWidth: 260 });
+    pointLosPopup = L.popup({
+      className: 'los-point-popup',
+      maxWidth: 270,
+      autoClose: false,
+      closeOnClick: false,
+      offset: [0, -6]
+    });
   }
   pointLosPopup
     .setLatLng([lat, lon])
     .setContent('<div class="point-los-card"><div class="point-los-header">מחשב גובה LOS מזערי...</div></div>')
     .openOn(map);
+
+  const az = initialBearingDeg(state.lat0, state.lon0, lat, lon);
+  updateInspectionRay(az, true);
 
   worker.postMessage({
     type: 'GET_POINT_MIN_LOS',
@@ -338,7 +374,7 @@ function drawConcentricRangeRings() {
  * Initialize Web Worker (`js/viewshed-worker.js`)
  */
 function initWorker() {
-  worker = new Worker('/js/viewshed-worker.js');
+  worker = new Worker('/js/viewshed-worker.js?v=2.5');
 
   worker.onmessage = async (e) => {
     const msg = e.data;
@@ -377,6 +413,11 @@ function initWorker() {
       renderViewshedPolygon(msg.polygonLatLons);
       updateReadoutsUI();
       updateInspectionRay(state.inspectAzimuthDeg, true);
+
+      if (msg.isFinal && pointLosPopup && map.hasLayer(pointLosPopup)) {
+        const ll = pointLosPopup.getLatLng();
+        requestPointMinLos(ll.lat, ll.lng, true);
+      }
       return;
     }
 
@@ -386,6 +427,45 @@ function initWorker() {
       if (chartRenderer) {
         chartRenderer.setProfile(p);
       }
+      return;
+    }
+
+    if (msg.type === 'POINT_MIN_LOS_RESULT') {
+      if (msg.reqId !== longPressReqId || !pointLosPopup) return;
+      const isAgl = state.altRef === 'agl';
+      const curvTag = state.curvatureMode === 'rf' ? 'RF 4/3' : 'אופטי 1.0';
+      const minActiveM = isAgl ? msg.minAglM : msg.minAslM;
+      const minActiveFt = Math.ceil(minActiveM / FT_TO_M);
+      const minOtherM = isAgl ? msg.minAslM : msg.minAglM;
+      const minOtherFt = Math.ceil(minOtherM / FT_TO_M);
+      const activeLabel = isAgl ? 'AGL (מעל הקרקע)' : 'ASL (מעל פני הים)';
+      const otherLabel = isAgl ? 'ASL' : 'AGL';
+
+      // Compare current aircraft setting with required minimum at this point
+      const isVisible = state.hUavFt >= minActiveFt;
+      const statusHtml = isVisible
+        ? `<div class="point-los-status ok">✓ בקו ראייה בגובה הנוכחי (<span dir="ltr">${state.hUavFt.toLocaleString('en-US')} ft</span>)</div>`
+        : `<div class="point-los-status blocked">✕ חסום בגובה הנוכחי (חסרים <span dir="ltr">${(minActiveFt - state.hUavFt).toLocaleString('en-US')} ft</span>)</div>`;
+
+      const ridgeLine =
+        msg.blockingDistKm > 0.1
+          ? `<div class="point-los-row"><span>רכס חוסם:</span><span dir="ltr">${msg.blockingDistKm.toFixed(1)} km (${msg.blockingHeightM} m)</span></div>`
+          : '';
+
+      const html = `
+        <div class="point-los-card">
+          <div class="point-los-header">גובה LOS מזערי בנקודה (${curvTag})</div>
+          <div class="point-los-main" dir="ltr">${minActiveFt.toLocaleString('en-US')} ft <span class="point-los-sub">(${minActiveM} m)</span></div>
+          <div class="point-los-mode-tag">${activeLabel}</div>
+          ${statusHtml}
+          <div class="point-los-divider"></div>
+          <div class="point-los-row"><span>מרחק / אזימוט:</span><span dir="ltr">${msg.distanceKm.toFixed(1)} km | ${msg.azimuthDeg.toFixed(1)}°</span></div>
+          <div class="point-los-row"><span>גובה קרקע בנקודה:</span><span dir="ltr">${msg.targetGroundM} m ASL</span></div>
+          <div class="point-los-row"><span>מקביל (${otherLabel}):</span><span dir="ltr">${minOtherFt.toLocaleString('en-US')} ft (${minOtherM} m)</span></div>
+          ${ridgeLine}
+        </div>
+      `;
+      pointLosPopup.setContent(html);
     }
   };
 }
@@ -411,7 +491,13 @@ async function decodePngOnMainThread(pngArrayBuffer) {
 function renderViewshedPolygon(polygonLatLons) {
   if (!polygonLatLons || !polygonLatLons.length) return;
 
-  const mainColor = state.curvatureMode === 'rf' ? '#22c55e' : '#f59e0b';
+  let mainColor = '#22c55e';
+  if (state.curvatureMode === 'rf') {
+    mainColor = state.altRef === 'agl' ? '#06b6d4' : '#22c55e';
+  } else {
+    mainColor = state.altRef === 'agl' ? '#f97316' : '#f59e0b';
+  }
+
   polygonHaloLayer.setLatLngs(polygonLatLons);
   polygonMainLayer.setLatLngs(polygonLatLons);
   polygonMainLayer.setStyle({
@@ -434,13 +520,14 @@ function triggerFullViewshedCalculation() {
       hAntM: state.hAntM,
       hUavM,
       maxRangeKm: state.rMaxKm,
-      kFactor: state.kFactor
+      kFactor: state.kFactor,
+      altRef: state.altRef
     }
   });
 }
 
 /**
- * Trigger instant 60 FPS analytical update when Aircraft Altitude (H_UAV) or Max Range (R_max) slider moves
+ * Trigger instant 60 FPS analytical update when Aircraft Altitude (H_UAV), AltRef (ASL/AGL), or Max Range (R_max) changes
  */
 function triggerFast60FpsUpdate() {
   if (!worker) return;
@@ -449,7 +536,8 @@ function triggerFast60FpsUpdate() {
     type: 'FAST_UPDATE_ALT_RANGE',
     payload: {
       hUavM,
-      maxRangeKm: state.rMaxKm
+      maxRangeKm: state.rMaxKm,
+      altRef: state.altRef
     }
   });
 }
@@ -492,8 +580,9 @@ function updateInspectionRay(azimuthDeg, forceImmediate = false) {
         ? ` | Ridge: ${bestRay.blockingDistKm.toFixed(1)} km (${Math.round(bestRay.blockingHeightM)} m)`
         : '';
     const lockTag = state.inspectLocked ? ' [LOCK]' : '';
+    const refTag = state.altRef === 'agl' ? 'AGL' : 'ASL';
     document.getElementById('ray-telemetry-text').textContent =
-      `Az: ${bestRay.azimuthDeg.toFixed(1)}°${lockTag} | LOS: ${bestRay.rangeKm.toFixed(1)} km${ridgeInfo}`;
+      `Az: ${bestRay.azimuthDeg.toFixed(1)}°${lockTag} | LOS (${refTag}): ${bestRay.rangeKm.toFixed(1)} km${ridgeInfo}`;
   }
 
   const now = performance.now();
@@ -506,7 +595,8 @@ function updateInspectionRay(azimuthDeg, forceImmediate = false) {
       payload: {
         azimuthDeg: state.inspectAzimuthDeg,
         hUavM: state.hUavFt * FT_TO_M,
-        maxRangeKm: state.rMaxKm
+        maxRangeKm: state.rMaxKm,
+        altRef: state.altRef
       }
     });
   }
@@ -544,7 +634,7 @@ function updateReadoutsUI() {
 
   document.getElementById('readout-h-ground').textContent = `${state.hGroundM} m`;
   document.getElementById('readout-h0').textContent = `${H0} m`;
-  document.getElementById('readout-uav-m').textContent = `${hUavM.toLocaleString('en-US')} m`;
+  document.getElementById('readout-uav-m').textContent = `${hUavM.toLocaleString('en-US')} m ${refTag}`;
 
   document.getElementById('collapsed-summary').textContent = `${state.hUavFt.toLocaleString(
     'en-US'
@@ -696,6 +786,10 @@ function bindUIEvents() {
     document.getElementById('slider-h-uav-ft').value = state.hUavFt;
     updateReadoutsUI();
     triggerFast60FpsUpdate();
+    if (pointLosPopup && map.hasLayer(pointLosPopup)) {
+      const ll = pointLosPopup.getLatLng();
+      requestPointMinLos(ll.lat, ll.lng, true);
+    }
   };
   document.getElementById('slider-h-uav-ft').addEventListener('input', (e) => onUavFtChange(e.target.value));
   document.getElementById('input-h-uav-ft').addEventListener('change', (e) => onUavFtChange(e.target.value));
@@ -709,7 +803,7 @@ function bindUIEvents() {
     triggerFast60FpsUpdate();
     if (pointLosPopup && map.hasLayer(pointLosPopup)) {
       const ll = pointLosPopup.getLatLng();
-      requestPointMinLos(ll.lat, ll.lng);
+      requestPointMinLos(ll.lat, ll.lng, true);
     }
   });
 
@@ -722,7 +816,7 @@ function bindUIEvents() {
     triggerFast60FpsUpdate();
     if (pointLosPopup && map.hasLayer(pointLosPopup)) {
       const ll = pointLosPopup.getLatLng();
-      requestPointMinLos(ll.lat, ll.lng);
+      requestPointMinLos(ll.lat, ll.lng, true);
     }
   });
 
@@ -769,8 +863,17 @@ function bindUIEvents() {
 
 function initServiceWorker() {
   if ('serviceWorker' in navigator) {
+    let refreshing = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (refreshing) return;
+      refreshing = true;
+      window.location.reload();
+    });
     window.addEventListener('load', () => {
-      navigator.serviceWorker.register('/sw.js').catch(() => {});
+      navigator.serviceWorker
+        .register('/sw.js?v=2.5')
+        .then((reg) => reg.update().catch(() => {}))
+        .catch(() => {});
     });
   }
 }

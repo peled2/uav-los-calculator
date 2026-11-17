@@ -1,15 +1,15 @@
-const APP_CACHE = 'uav-los-shell-v2.3';
-const TILE_CACHE = 'uav-los-tiles-v2.3';
-const TERRARIUM_CACHE = 'uav-los-terrarium-v2.3';
+const APP_CACHE = 'uav-los-shell-v2.5';
+const TILE_CACHE = 'uav-los-tiles-v2.5';
+const TERRARIUM_CACHE = 'uav-los-terrarium-v2.5';
 
 const CORE_ASSETS = [
   '/',
   '/index.html',
-  '/css/styles.css',
+  '/css/styles.css?v=2.5',
   '/js/los-math.js',
-  '/js/viewshed-worker.js',
+  '/js/viewshed-worker.js?v=2.5',
   '/js/chart-renderer.js',
-  '/js/app.js',
+  '/js/app.js?v=2.5',
   '/manifest.webmanifest',
   '/icons/icon.svg',
   '/icons/icon-192.png',
