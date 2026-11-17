@@ -87,11 +87,14 @@ export class LosChartRenderer {
     const maxDistKm = Math.max(1, p.maxRangeKm);
     const inv2Re = 1.0 / (2.0 * p.Re);
 
+    const isAgl = p.altRef === 'agl';
     let minY = Math.min(0, p.H0);
     let maxY = Math.max(p.H0 + 200, p.hUavM + 200);
 
     for (const s of samples) {
       if (s.effectiveHeightM < minY) minY = s.effectiveHeightM;
+      const uavPointY = isAgl ? s.effectiveHeightM + p.hUavM : p.hUavM;
+      if (uavPointY > maxY) maxY = uavPointY;
       if (s.terrainAslM > maxY) maxY = s.terrainAslM;
     }
     const ySpan = Math.max(200, maxY - minY);
@@ -170,11 +173,11 @@ export class LosChartRenderer {
     ctx.lineWidth = 1.6;
     ctx.stroke();
 
-    // 4. Aircraft Constant-Altitude Curve: y_UAV(d) = H_UAV - d^2 / (2 * Re)
+    // 4. Aircraft Trajectory Curve (ASL constant vs AGL terrain-following)
     ctx.beginPath();
     samples.forEach((s, idx) => {
       const dM = s.distanceKm * 1000.0;
-      const yUav = p.hUavM - dM * dM * inv2Re;
+      const yUav = isAgl ? s.effectiveHeightM + p.hUavM : p.hUavM - dM * dM * inv2Re;
       const px = xToPx(s.distanceKm);
       const py = yToPx(yUav);
       if (idx === 0) ctx.moveTo(px, py);
@@ -188,7 +191,19 @@ export class LosChartRenderer {
 
     // 5. Direct LOS Tangent Ray from Station (0, H0) to (rMaxKm, yUavAtRMax)
     const rMaxM = p.rMaxKm * 1000.0;
-    const yUavAtRMax = p.hUavM - rMaxM * rMaxM * inv2Re;
+    let yUavAtRMax = p.hUavM - rMaxM * rMaxM * inv2Re;
+    if (isAgl) {
+      // Interpolate effective terrain height at rMaxKm
+      const stepKm = maxDistKm / Math.max(1, samples.length - 1);
+      const fIdx = Math.max(0, Math.min(samples.length - 1, p.rMaxKm / stepKm));
+      const i0 = Math.floor(fIdx);
+      const i1 = Math.min(samples.length - 1, i0 + 1);
+      const frac = fIdx - i0;
+      const effTerr =
+        samples[i0].effectiveHeightM +
+        frac * (samples[i1].effectiveHeightM - samples[i0].effectiveHeightM);
+      yUavAtRMax = effTerr + p.hUavM;
+    }
     const gcsX = xToPx(0);
     const gcsY = yToPx(p.H0);
     const endX = xToPx(p.rMaxKm);

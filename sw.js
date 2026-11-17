@@ -1,6 +1,6 @@
-const APP_CACHE = 'uav-los-shell-v2.2';
-const TILE_CACHE = 'uav-los-tiles-v2.2';
-const TERRARIUM_CACHE = 'uav-los-terrarium-v2.2';
+const APP_CACHE = 'uav-los-shell-v2.3';
+const TILE_CACHE = 'uav-los-tiles-v2.3';
+const TERRARIUM_CACHE = 'uav-los-terrarium-v2.3';
 
 const CORE_ASSETS = [
   '/',

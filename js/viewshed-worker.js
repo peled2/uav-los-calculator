@@ -368,7 +368,9 @@ function traceRayHorizonRidges(azimuthDeg, maxRangeM) {
   const inv2Re = 1.0 / (2.0 * Re);
 
   let alphaMax = -Infinity;
+  let maxReqAglSoFar = -Infinity;
   const ridgesList = [];
+  const aglStepsList = [];
 
   // -------------------------------------------------------------------------
   // Part 1: Near Field (60 m to 15,000 m) at 60 m step using Zoom 11 tiles
@@ -386,18 +388,24 @@ function traceRayHorizonRidges(azimuthDeg, maxRangeM) {
       alphaMax = alpha;
       ridgesList.push(d, h);
     }
+
+    const rayHeightAsl = H0 + d * alphaMax + d * d * inv2Re;
+    const reqAgl = Math.max(0.0, rayHeightAsl - h);
+    if (reqAgl > maxReqAglSoFar) {
+      maxReqAglSoFar = reqAgl;
+      aglStepsList.push(d, reqAgl);
+    }
   }
 
   if (maxRangeM <= NEAR_LIMIT_M) {
-    return new Float32Array(ridgesList);
+    return {
+      ridges: new Float32Array(ridgesList),
+      aglSteps: new Float32Array(aglStepsList)
+    };
   }
 
   // -------------------------------------------------------------------------
   // Part 2: Mid & Far Field (15,000 m to maxRangeM) using Hierarchical BVH Boxes
-  // Level 3 super-box = 64 base steps (15,360 m)
-  // Level 2 mid-box   = 16 base steps (3,840 m)
-  // Level 1 mini-box  = 4 base steps  (960 m)
-  // Level 0 base cell = 1 base step   (240 m)
   // -------------------------------------------------------------------------
   const totalFarSteps = Math.ceil((maxRangeM - NEAR_LIMIT_M) / FAR_STEP_M);
 
@@ -435,12 +443,9 @@ function traceRayHorizonRidges(azimuthDeg, maxRangeM) {
     const alphaUpper = (hBoxMax - H0) / dForSlope - dStart * inv2Re;
 
     if (alphaUpper <= alphaMax) {
-      // "זיכוי" (Culled!): No point in this box can possibly exceed the current horizon alphaMax
       return;
     }
 
-    // "חשד לחסימה" (Subdivide!): Coarse box is NEVER allowed to update alphaMax.
-    // Split into 4 sub-boxes of the next finer pyramid level (pyrLevel - 1)
     const span = stepEnd - stepStart;
     const subSpan = Math.max(1, span >> 2);
     const nextLevel = pyrLevel - 1;
@@ -474,7 +479,6 @@ function traceRayHorizonRidges(azimuthDeg, maxRangeM) {
     }
   };
 
-  // Traverse far field in Level-3 super-boxes of 64 steps (~15.36 km each)
   const SUPER_BOX_STEPS = 64;
   let [curD, curGx, curGy] = getStepPixelZ9(0);
 
@@ -489,17 +493,50 @@ function traceRayHorizonRidges(azimuthDeg, maxRangeM) {
     curGy = nextGy;
   }
 
-  return new Float32Array(ridgesList);
+  // -------------------------------------------------------------------------
+  // Part 3: Build Monotonic Horizon-Deficit Envelope (`aglSteps`) for 15..200 km
+  // Advances through `ridgesList` while sampling terrain every 480 m so valleys
+  // and basins are never missed in AGL mode!
+  // -------------------------------------------------------------------------
+  let ridgePtr = 0;
+  let curAlphaMax = -Infinity;
+  while (ridgePtr < ridgesList.length && ridgesList[ridgePtr] <= NEAR_LIMIT_M) {
+    const rd = ridgesList[ridgePtr];
+    const rh = ridgesList[ridgePtr + 1];
+    const ra = (rh - H0) / rd - rd * inv2Re;
+    if (ra > curAlphaMax) curAlphaMax = ra;
+    ridgePtr += 2;
+  }
+
+  const AGL_FAR_STEP_M = 480.0;
+  for (let d = NEAR_LIMIT_M + AGL_FAR_STEP_M; d <= maxRangeM; d += AGL_FAR_STEP_M) {
+    while (ridgePtr < ridgesList.length && ridgesList[ridgePtr] <= d) {
+      const rd = ridgesList[ridgePtr];
+      const rh = ridgesList[ridgePtr + 1];
+      const ra = (rh - H0) / rd - rd * inv2Re;
+      if (ra > curAlphaMax) curAlphaMax = ra;
+      ridgePtr += 2;
+    }
+
+    const [lat, lon] = destinationLatLon(lat0Rad, lon0Rad, sinLat0, cosLat0, d, bearingRad);
+    const h = sampleElevationAtZoom(lat, lon, 9) || 0.0;
+    const rayHeightAsl = H0 + d * curAlphaMax + d * d * inv2Re;
+    const reqAgl = Math.max(0.0, rayHeightAsl - h);
+    if (reqAgl > maxReqAglSoFar) {
+      maxReqAglSoFar = reqAgl;
+      aglStepsList.push(d, reqAgl);
+    }
+  }
+
+  return {
+    ridges: new Float32Array(ridgesList),
+    aglSteps: new Float32Array(aglStepsList)
+  };
 }
 
 /**
  * Analytical O(K) evaluation of maximum LOS range `r_max(theta)` from precomputed `ridges`
- * for a given aircraft altitude `hUavM` (ASL in meters) and `maxRangeM`.
- *
- * Implements the exact quadratic shadow intersection equation from Section 4.3:
- *   alpha_j = (h_j - H_0) / d_j - d_j / (2 * R_e)
- *   r_shadow = -R_e * alpha_j + sqrt((R_e * alpha_j)^2 + 2 * R_e * (H_UAV - H_0))
- *   r_max = min(r_max, max(d_j, r_shadow))
+ * for ASL mode (`hUavM` in meters ASL).
  */
 function solveRayMaxRangeFromRidges(ridges, hUavM, maxRangeM) {
   const { H0, Re } = stationState;
@@ -507,12 +544,10 @@ function solveRayMaxRangeFromRidges(ridges, hUavM, maxRangeM) {
   const deltaHUav = hUavM - H0;
   const twoReDeltaH = 2.0 * Re * deltaHUav;
 
-  // Theoretical smooth-Earth sea-level horizon if no ridges block
   let rMax = maxRangeM;
   let blockingDistM = 0;
   let blockingHeightM = 0;
 
-  // Also account for smooth sea-level (h=0) horizon when aircraft is far away
   const hSea = 0.0;
   const dSeaTangent = H0 > hSea ? Math.sqrt(2.0 * Re * (H0 - hSea)) : 60.0;
   if (dSeaTangent < rMax && hUavM >= hSea) {
@@ -534,26 +569,20 @@ function solveRayMaxRangeFromRidges(ridges, hUavM, maxRangeM) {
     const hj = ridges[i + 1];
     const alphaJ = (hj - H0) / dj - dj * inv2Re;
 
-    // Angle of the aircraft itself if it were at distance dj:
     const uavAngleAtDj = deltaHUav / dj - dj * inv2Re;
     if (uavAngleAtDj <= alphaJ) {
-      // Mountain peak at dj is directly at or above the aircraft altitude!
       rMax = dj;
       blockingDistM = dj;
       blockingHeightM = hj;
       break;
     }
 
-    // Solve quadratic equation for r_shadow > dj where tangent ray at angle alphaJ meets H_UAV:
     const reAlpha = Re * alphaJ;
     const disc = reAlpha * reAlpha + twoReDeltaH;
-    let rShadow;
     if (disc < 0.0) {
-      // Tangent ray dips and rises without reaching H_UAV (only possible if H_UAV < H0)
       continue;
-    } else {
-      rShadow = -reAlpha + Math.sqrt(disc);
     }
+    const rShadow = -reAlpha + Math.sqrt(disc);
 
     const effectiveLimit = rShadow > dj ? rShadow : dj;
     if (effectiveLimit < rMax) {
@@ -571,39 +600,92 @@ function solveRayMaxRangeFromRidges(ridges, hUavM, maxRangeM) {
 }
 
 /**
- * Evaluate all currently cached rays for `(hUavM, maxRangeKm)` and build polygon payload
+ * O(log K) Binary Search on `aglSteps` (`[d1, reqAgl1, d2, reqAgl2, ...]`)
+ * for AGL mode (`hUavAglM` in meters above local terrain).
  */
-function evaluatePolygonFromCachedRays(hUavM, maxRangeKm, stageLabel, isFinal) {
+function solveRayMaxRangeAgl(aglSteps, ridges, hUavAglM, maxRangeM) {
+  const numPairs = aglSteps.length >> 1;
+  if (numPairs === 0) {
+    return { rMaxM: maxRangeM, blockingDistM: 0, blockingHeightM: 0 };
+  }
+
+  // Binary search for first pair index `mid` where reqAgl > hUavAglM
+  let lo = 0;
+  let hi = numPairs - 1;
+  let foundIdx = -1;
+
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const reqAgl = aglSteps[mid * 2 + 1];
+    if (reqAgl > hUavAglM) {
+      foundIdx = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+
+  if (foundIdx === -1) {
+    return { rMaxM: maxRangeM, blockingDistM: 0, blockingHeightM: 0 };
+  }
+
+  const dCurr = aglSteps[foundIdx * 2];
+  const aglCurr = aglSteps[foundIdx * 2 + 1];
+  let rMax = dCurr;
+
+  if (foundIdx > 0) {
+    const dPrev = aglSteps[(foundIdx - 1) * 2];
+    const aglPrev = aglSteps[(foundIdx - 1) * 2 + 1];
+    const spanAgl = aglCurr - aglPrev;
+    if (spanAgl > 0.01) {
+      const frac = Math.max(0.0, Math.min(1.0, (hUavAglM - aglPrev) / spanAgl));
+      rMax = dPrev + frac * (dCurr - dPrev);
+    }
+  }
+
+  rMax = Math.max(60.0, Math.min(maxRangeM, rMax));
+
+  // Find the controlling ridge before rMax for marker/telemetry display
+  let blockingDistM = 0;
+  let blockingHeightM = 0;
+  for (let i = 0; i < ridges.length; i += 2) {
+    if (ridges[i] <= rMax) {
+      blockingDistM = ridges[i];
+      blockingHeightM = ridges[i + 1];
+    } else {
+      break;
+    }
+  }
+
+  return { rMaxM: rMax, blockingDistM, blockingHeightM };
+}
+
+/**
+ * Evaluate all currently cached rays for `(hUavM, maxRangeKm, altRef)` and build polygon payload
+ */
+function evaluatePolygonFromCachedRays(hUavM, maxRangeKm, altRef, stageLabel, isFinal) {
   const maxRangeM = maxRangeKm * 1000.0;
   const { lat0, lon0 } = stationState;
   const lat0Rad = lat0 * DEG_TO_RAD;
   const lon0Rad = lon0 * DEG_TO_RAD;
   const sinLat0 = Math.sin(lat0Rad);
   const cosLat0 = Math.cos(lat0Rad);
+  const isAgl = altRef === 'agl';
 
   const sortedKeys = Array.from(cachedRaysMap.keys()).sort((a, b) => a - b);
   const numRays = sortedKeys.length;
 
   const polygonLatLons = new Array(numRays);
   const raySummaries = new Array(numRays);
-  let sumRangeKm = 0.0;
-  let minRangeKm = maxRangeKm;
-  let maxObservedRangeKm = 0.0;
 
   for (let i = 0; i < numRays; i++) {
     const rayObj = cachedRaysMap.get(sortedKeys[i]);
     const azDeg = rayObj.azimuthDeg;
-    const { rMaxM, blockingDistM, blockingHeightM } = solveRayMaxRangeFromRidges(
-      rayObj.ridges,
-      hUavM,
-      maxRangeM
-    );
+    const { rMaxM, blockingDistM, blockingHeightM } = isAgl
+      ? solveRayMaxRangeAgl(rayObj.aglSteps, rayObj.ridges, hUavM, maxRangeM)
+      : solveRayMaxRangeFromRidges(rayObj.ridges, hUavM, maxRangeM);
 
     const rKm = rMaxM / 1000.0;
-    sumRangeKm += rKm;
-    if (rKm < minRangeKm) minRangeKm = rKm;
-    if (rKm > maxObservedRangeKm) maxObservedRangeKm = rKm;
-
     const [lat, lon] = destinationLatLon(
       lat0Rad,
       lon0Rad,
@@ -624,17 +706,12 @@ function evaluatePolygonFromCachedRays(hUavM, maxRangeKm, stageLabel, isFinal) {
     };
   }
 
-  const avgRangeKm = numRays > 0 ? sumRangeKm / numRays : 0;
-
   return {
     stage: stageLabel,
     isFinal,
     numRays,
     hGroundM: stationState.hGroundM,
     H0: stationState.H0,
-    avgRangeKm,
-    minRangeKm,
-    maxObservedRangeKm,
     polygonLatLons,
     raySummaries
   };
@@ -651,14 +728,14 @@ async function runProgressiveViewshed(params) {
     hAntM,
     hUavM,
     maxRangeKm,
-    kFactor
+    kFactor,
+    altRef = 'asl'
   } = params;
 
-  const maxLoadKm = 200; // Always trace ridges out to 200 km so slider changes up to 200 km are instant!
+  const maxLoadKm = 200;
   const ok = await preloadTilesForStation(lat0, lon0, maxLoadKm, jobId);
   if (!ok || jobId !== currentJobId) return;
 
-  // Determine ground elevation at station from Zoom 11 Terrarium tile
   let hGroundM = sampleElevationAtZoom(lat0, lon0, 11);
   if (hGroundM === null) {
     hGroundM = sampleElevationAtZoom(lat0, lon0, 9) || 0.0;
@@ -679,37 +756,32 @@ async function runProgressiveViewshed(params) {
   cachedRaysMap.clear();
   const maxTraceM = maxLoadKm * 1000.0;
 
-  // =========================================================================
-  // STAGE 1: 360 Rays (every 1.0°) -> immediate initial polygon (< 1 second)
-  // =========================================================================
+  // STAGE 1: 360 Rays (every 1.0°)
   for (let i = 0; i < 360; i++) {
     if (jobId !== currentJobId) return;
     const azDeg = i * 1.0;
     const key = Math.round(azDeg * 4);
-    const ridges = traceRayHorizonRidges(azDeg, maxTraceM);
-    cachedRaysMap.set(key, { azimuthDeg: azDeg, ridges });
+    const { ridges, aglSteps } = traceRayHorizonRidges(azDeg, maxTraceM);
+    cachedRaysMap.set(key, { azimuthDeg: azDeg, ridges, aglSteps });
   }
 
-  const stage1Result = evaluatePolygonFromCachedRays(hUavM, maxRangeKm, 'stage1-360', false);
+  const stage1Result = evaluatePolygonFromCachedRays(hUavM, maxRangeKm, altRef, 'stage1-360', false);
   self.postMessage({
     type: 'VIEWSHED_RESULT',
     jobId,
     ...stage1Result
   });
 
-  // Yield briefly so browser renders Stage 1 polygon immediately
   await new Promise((r) => setTimeout(r, 15));
   if (jobId !== currentJobId) return;
 
-  // =========================================================================
   // STAGE 2: Complete to 720 Rays (every 0.5°) + Adaptive 0.25° Refinement
-  // =========================================================================
   for (let i = 0; i < 360; i++) {
     if (jobId !== currentJobId) return;
     const azDeg = i + 0.5;
     const key = Math.round(azDeg * 4);
-    const ridges = traceRayHorizonRidges(azDeg, maxTraceM);
-    cachedRaysMap.set(key, { azimuthDeg: azDeg, ridges });
+    const { ridges, aglSteps } = traceRayHorizonRidges(azDeg, maxTraceM);
+    cachedRaysMap.set(key, { azimuthDeg: azDeg, ridges, aglSteps });
 
     if (i % 90 === 0) {
       self.postMessage({
@@ -717,7 +789,7 @@ async function runProgressiveViewshed(params) {
         jobId,
         phase: 'stage2',
         progressPct: 50 + Math.round((i / 360) * 35),
-        label: `מחשב 720 קרניים (0.5°)...`
+        label: 'מחשב 720 קרניים...'
       });
       await new Promise((r) => setTimeout(r, 0));
     }
@@ -725,12 +797,14 @@ async function runProgressiveViewshed(params) {
 
   if (jobId !== currentJobId) return;
 
-  // Adaptive 0.25° angular refinement in sectors with sharp range jumps (> 3.5 km)
   const maxRangeM = maxRangeKm * 1000.0;
   const keys720 = Array.from(cachedRaysMap.keys()).sort((a, b) => a - b);
+  const isAgl = altRef === 'agl';
   const ranges720 = keys720.map((k) => {
     const rObj = cachedRaysMap.get(k);
-    return solveRayMaxRangeFromRidges(rObj.ridges, hUavM, maxRangeM).rMaxM;
+    return isAgl
+      ? solveRayMaxRangeAgl(rObj.aglSteps, rObj.ridges, hUavM, maxRangeM).rMaxM
+      : solveRayMaxRangeFromRidges(rObj.ridges, hUavM, maxRangeM).rMaxM;
   });
 
   for (let i = 0; i < keys720.length; i++) {
@@ -740,13 +814,13 @@ async function runProgressiveViewshed(params) {
       const azMid = keys720[i] / 4.0 + 0.25;
       const midKey = Math.round(azMid * 4);
       if (!cachedRaysMap.has(midKey) && midKey < 1440) {
-        const ridges = traceRayHorizonRidges(azMid, maxTraceM);
-        cachedRaysMap.set(midKey, { azimuthDeg: azMid, ridges });
+        const { ridges, aglSteps } = traceRayHorizonRidges(azMid, maxTraceM);
+        cachedRaysMap.set(midKey, { azimuthDeg: azMid, ridges, aglSteps });
       }
     }
   }
 
-  const stage2Result = evaluatePolygonFromCachedRays(hUavM, maxRangeKm, 'stage2-refined', true);
+  const stage2Result = evaluatePolygonFromCachedRays(hUavM, maxRangeKm, altRef, 'stage2-refined', true);
   self.postMessage({
     type: 'VIEWSHED_RESULT',
     jobId,
@@ -757,7 +831,7 @@ async function runProgressiveViewshed(params) {
 /**
  * Generate dense terrain cross-section profile along a specific azimuth for the bottom drawer
  */
-function buildRayCrossSectionProfile(azimuthDeg, hUavM, maxRangeKm) {
+function buildRayCrossSectionProfile(azimuthDeg, hUavM, maxRangeKm, altRef = 'asl') {
   const { lat0, lon0, hGroundM, H0, Re } = stationState;
   const lat0Rad = lat0 * DEG_TO_RAD;
   const lon0Rad = lon0 * DEG_TO_RAD;
@@ -771,15 +845,13 @@ function buildRayCrossSectionProfile(azimuthDeg, hUavM, maxRangeKm) {
   const stepM = maxDistM / numSamples;
   const inv2Re = 1.0 / (2.0 * Re);
 
-  // Find or trace exact ridges on this azimuth to get rMax and blocking ridge
   const nearestKey = Math.round(normAz * 2) * 2;
   const cachedRay = cachedRaysMap.get(nearestKey % 1440);
-  const ridges = cachedRay ? cachedRay.ridges : traceRayHorizonRidges(normAz, maxDistM);
-  const { rMaxM, blockingDistM, blockingHeightM } = solveRayMaxRangeFromRidges(
-    ridges,
-    hUavM,
-    maxDistM
-  );
+  const rayData = cachedRay || traceRayHorizonRidges(normAz, maxDistM);
+  const { rMaxM, blockingDistM, blockingHeightM } =
+    altRef === 'agl'
+      ? solveRayMaxRangeAgl(rayData.aglSteps, rayData.ridges, hUavM, maxDistM)
+      : solveRayMaxRangeFromRidges(rayData.ridges, hUavM, maxDistM);
 
   const profileSamples = [];
   for (let i = 0; i <= numSamples; i++) {
@@ -837,15 +909,129 @@ function buildRayCrossSectionProfile(azimuthDeg, hUavM, maxRangeKm) {
     blockLon,
     H0,
     hUavM,
+    altRef,
     Re,
     profileSamples
   };
 }
 
 /**
+ * Compute exact Minimum LOS Altitude (both ASL & AGL) at a specific map point (targetLat, targetLon)
+ * triggered by Long-Press on the map.
+ */
+async function computePointMinLos(targetLat, targetLon) {
+  const { lat0, lon0, H0, Re } = stationState;
+  const lat0Rad = lat0 * DEG_TO_RAD;
+  const lon0Rad = lon0 * DEG_TO_RAD;
+  const lat1Rad = targetLat * DEG_TO_RAD;
+  const lon1Rad = targetLon * DEG_TO_RAD;
+
+  const dLat = lat1Rad - lat0Rad;
+  const dLon = lon1Rad - lon0Rad;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat0Rad) * Math.cos(lat1Rad) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+  const totalDistM = EARTH_RADIUS_M * c;
+
+  const y = Math.sin(dLon) * Math.cos(lat1Rad);
+  const x =
+    Math.cos(lat0Rad) * Math.sin(lat1Rad) -
+    Math.sin(lat0Rad) * Math.cos(lat1Rad) * Math.cos(dLon);
+  const azimuthDeg = (Math.atan2(y, x) * RAD_TO_DEG + 360) % 360;
+
+  if (totalDistM < 30.0) {
+    return {
+      targetLat,
+      targetLon,
+      distanceKm: 0,
+      azimuthDeg: 0,
+      targetGroundM: stationState.hGroundM,
+      minAslM: H0,
+      minAglM: stationState.hAntM,
+      blockingDistKm: 0,
+      blockingHeightM: 0
+    };
+  }
+
+  // Ensure Zoom 9 tile at target (and any intermediate tiles if >200 km) is loaded
+  const txTarget = Math.floor(lonToTileXFloat(targetLon, 9));
+  const tyTarget = Math.floor(latToTileYFloat(targetLat, 9));
+  await loadTerrariumTile(9, txTarget, tyTarget);
+
+  const sinLat0 = Math.sin(lat0Rad);
+  const cosLat0 = Math.cos(lat0Rad);
+  const bearingRad = azimuthDeg * DEG_TO_RAD;
+  const inv2Re = 1.0 / (2.0 * Re);
+
+  let alphaMax = -Infinity;
+  let blockingDistM = 0;
+  let blockingHeightM = 0;
+
+  // Fine near-field scan up to min(15 km, totalDistM)
+  const nearLimit = Math.min(NEAR_LIMIT_M, totalDistM - 30.0);
+  for (let d = NEAR_STEP_M; d <= nearLimit; d += NEAR_STEP_M) {
+    const [lat, lon] = destinationLatLon(lat0Rad, lon0Rad, sinLat0, cosLat0, d, bearingRad);
+    const h = sampleElevationAtZoom(lat, lon, 11) ?? sampleElevationAtZoom(lat, lon, 9) ?? 0.0;
+    const alpha = (h - H0) / d - d * inv2Re;
+    if (alpha > alphaMax) {
+      alphaMax = alpha;
+      blockingDistM = d;
+      blockingHeightM = h;
+    }
+  }
+
+  // Far-field scan from 15 km up to totalDistM
+  if (totalDistM > NEAR_LIMIT_M) {
+    for (let d = NEAR_LIMIT_M + FAR_STEP_M; d < totalDistM; d += FAR_STEP_M) {
+      const [lat, lon] = destinationLatLon(lat0Rad, lon0Rad, sinLat0, cosLat0, d, bearingRad);
+      let h = sampleElevationAtZoom(lat, lon, 9);
+      if (h === null) {
+        const tx = Math.floor(lonToTileXFloat(lon, 9));
+        const ty = Math.floor(latToTileYFloat(lat, 9));
+        await loadTerrariumTile(9, tx, ty);
+        h = sampleElevationAtZoom(lat, lon, 9) ?? 0.0;
+      }
+      const alpha = (h - H0) / d - d * inv2Re;
+      if (alpha > alphaMax) {
+        alphaMax = alpha;
+        blockingDistM = d;
+        blockingHeightM = h;
+      }
+    }
+  }
+
+  const targetGroundM =
+    (totalDistM <= NEAR_LIMIT_M ? sampleElevationAtZoom(targetLat, targetLon, 11) : null) ??
+    sampleElevationAtZoom(targetLat, targetLon, 9) ??
+    0.0;
+
+  // Minimum LOS Altitude ASL at targetDistM
+  const rayHeightAtTarget =
+    alphaMax > -Infinity
+      ? H0 + totalDistM * alphaMax + totalDistM * totalDistM * inv2Re
+      : H0 + totalDistM * totalDistM * inv2Re;
+
+  const minAslM = Math.max(targetGroundM, rayHeightAtTarget);
+  const minAglM = Math.max(0.0, minAslM - targetGroundM);
+
+  return {
+    targetLat,
+    targetLon,
+    distanceKm: totalDistM / 1000.0,
+    azimuthDeg,
+    targetGroundM: Math.round(targetGroundM),
+    minAslM: Math.round(minAslM),
+    minAglM: Math.round(minAglM),
+    blockingDistKm: blockingDistM / 1000.0,
+    blockingHeightM: Math.round(blockingHeightM)
+  };
+}
+
+/**
  * Handle Messages from Main Thread
  */
-self.onmessage = (e) => {
+self.onmessage = async (e) => {
   const msg = e.data;
   if (!msg || !msg.type) return;
 
@@ -863,11 +1049,11 @@ self.onmessage = (e) => {
     return;
   }
 
-  // Instant 60 FPS update when only aircraft altitude (H_UAV) or max range (R_max) changes!
+  // Instant 60 FPS update when Aircraft Altitude (H_UAV), Alt Ref (ASL/AGL), or Max Range changes
   if (msg.type === 'FAST_UPDATE_ALT_RANGE') {
     if (cachedRaysMap.size === 0) return;
-    const { hUavM, maxRangeKm } = msg.payload;
-    const result = evaluatePolygonFromCachedRays(hUavM, maxRangeKm, 'fast-60fps', true);
+    const { hUavM, maxRangeKm, altRef = 'asl' } = msg.payload;
+    const result = evaluatePolygonFromCachedRays(hUavM, maxRangeKm, altRef, 'fast-60fps', true);
     self.postMessage({
       type: 'VIEWSHED_RESULT',
       jobId: currentJobId,
@@ -876,14 +1062,24 @@ self.onmessage = (e) => {
     return;
   }
 
-  // Request dense cross-section profile along a specific hovered/clicked azimuth
   if (msg.type === 'GET_RAY_PROFILE') {
     if (cachedRaysMap.size === 0) return;
-    const { azimuthDeg, hUavM, maxRangeKm } = msg.payload;
-    const profile = buildRayCrossSectionProfile(azimuthDeg, hUavM, maxRangeKm);
+    const { azimuthDeg, hUavM, maxRangeKm, altRef = 'asl' } = msg.payload;
+    const profile = buildRayCrossSectionProfile(azimuthDeg, hUavM, maxRangeKm, altRef);
     self.postMessage({
       type: 'RAY_PROFILE_RESULT',
       profile
+    });
+    return;
+  }
+
+  if (msg.type === 'GET_POINT_MIN_LOS') {
+    const { reqId, targetLat, targetLon } = msg.payload;
+    const pointResult = await computePointMinLos(targetLat, targetLon);
+    self.postMessage({
+      type: 'POINT_MIN_LOS_RESULT',
+      reqId,
+      ...pointResult
     });
   }
 };

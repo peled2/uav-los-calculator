@@ -110,16 +110,22 @@
           </div>
         </div>
 
-        <!-- 3. Aircraft Altitude in Feet (H_UAV ft ASL) + Meters Readout -->
+        <!-- 3. Aircraft Altitude in Feet (H_UAV ft ASL / AGL) + Meters Readout -->
         <div class="control-block">
           <div class="block-header">
-            <label for="input-h-uav-ft" class="block-label">גובה כטב"מ (ASL)</label>
-            <bdi id="readout-uav-m" class="unit-pill" dir="ltr">3,048 m</bdi>
+            <label for="input-h-uav-ft" class="block-label">גובה כטב"מ</label>
+            <div class="alt-ref-group">
+              <div class="mini-seg" role="radiogroup" aria-label="ייחוס גובה">
+                <button type="button" id="btn-ref-asl" class="mini-seg-btn active">ASL</button>
+                <button type="button" id="btn-ref-agl" class="mini-seg-btn">AGL</button>
+              </div>
+              <bdi id="readout-uav-m" class="unit-pill" dir="ltr">3,048 m</bdi>
+            </div>
           </div>
           <div class="slider-row">
-            <input type="range" id="slider-h-uav-ft" class="range-slider" min="500" max="40000" step="100" value="10000" />
+            <input type="range" id="slider-h-uav-ft" class="range-slider" min="100" max="40000" step="100" value="10000" />
             <div class="num-box-with-unit" dir="ltr">
-              <input type="number" id="input-h-uav-ft" min="500" max="40000" step="100" value="10000" />
+              <input type="number" id="input-h-uav-ft" min="100" max="40000" step="100" value="10000" />
               <span>ft</span>
             </div>
           </div>

@@ -210,7 +210,91 @@ function initMap() {
     }
   });
 
+  // Long-Press (500ms hold on Touch or Mouse) -> Show Minimum LOS Altitude at exact point
+  setupMapLongPressHandler();
+
   drawConcentricRangeRings();
+}
+
+function setupMapLongPressHandler() {
+  const mapEl = map.getContainer();
+  let pressTimer = null;
+  let startX = 0;
+  let startY = 0;
+
+  const cancelLongPress = () => {
+    if (pressTimer) {
+      clearTimeout(pressTimer);
+      pressTimer = null;
+    }
+  };
+
+  const startLongPress = (clientX, clientY) => {
+    cancelLongPress();
+    startX = clientX;
+    startY = clientY;
+    pressTimer = setTimeout(() => {
+      pressTimer = null;
+      const rect = mapEl.getBoundingClientRect();
+      const pt = L.point(clientX - rect.left, clientY - rect.top);
+      const latlng = map.containerPointToLatLng(pt);
+      requestPointMinLos(latlng.lat, latlng.lng);
+    }, 500);
+  };
+
+  mapEl.addEventListener(
+    'touchstart',
+    (e) => {
+      if (e.touches.length !== 1) {
+        cancelLongPress();
+        return;
+      }
+      startLongPress(e.touches[0].clientX, e.touches[0].clientY);
+    },
+    { passive: true }
+  );
+  mapEl.addEventListener(
+    'touchmove',
+    (e) => {
+      if (!pressTimer || e.touches.length !== 1) return;
+      const dx = e.touches[0].clientX - startX;
+      const dy = e.touches[0].clientY - startY;
+      if (dx * dx + dy * dy > 64) cancelLongPress();
+    },
+    { passive: true }
+  );
+  mapEl.addEventListener('touchend', cancelLongPress, { passive: true });
+  mapEl.addEventListener('touchcancel', cancelLongPress, { passive: true });
+
+  mapEl.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    startLongPress(e.clientX, e.clientY);
+  });
+  mapEl.addEventListener('mousemove', (e) => {
+    if (!pressTimer) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    if (dx * dx + dy * dy > 36) cancelLongPress();
+  });
+  mapEl.addEventListener('mouseup', cancelLongPress);
+  map.on('movestart zoomstart dragstart', cancelLongPress);
+}
+
+function requestPointMinLos(lat, lon) {
+  if (!worker) return;
+  const reqId = ++longPressReqId;
+  if (!pointLosPopup) {
+    pointLosPopup = L.popup({ className: 'los-point-popup', maxWidth: 260 });
+  }
+  pointLosPopup
+    .setLatLng([lat, lon])
+    .setContent('<div class="point-los-card"><div class="point-los-header">מחשב גובה LOS מזערי...</div></div>')
+    .openOn(map);
+
+  worker.postMessage({
+    type: 'GET_POINT_MIN_LOS',
+    payload: { reqId, targetLat: lat, targetLon: lon }
+  });
 }
 
 /**
@@ -456,6 +540,7 @@ function updateReadoutsUI() {
   const H0 = state.hGroundM + state.hAntM;
   const hUavM = Math.round(state.hUavFt * FT_TO_M);
   const modeTag = state.curvatureMode === 'rf' ? 'RF' : 'OPT';
+  const refTag = state.altRef === 'agl' ? 'AGL' : 'ASL';
 
   document.getElementById('readout-h-ground').textContent = `${state.hGroundM} m`;
   document.getElementById('readout-h0').textContent = `${H0} m`;
@@ -463,7 +548,7 @@ function updateReadoutsUI() {
 
   document.getElementById('collapsed-summary').textContent = `${state.hUavFt.toLocaleString(
     'en-US'
-  )} ft | ${modeTag}`;
+  )} ft ${refTag} | ${modeTag}`;
 }
 
 function syncUtmInputsFromState() {
@@ -602,11 +687,11 @@ function bindUIEvents() {
   document.getElementById('slider-h-ant').addEventListener('input', (e) => onAntChange(e.target.value));
   document.getElementById('input-h-ant').addEventListener('change', (e) => onAntChange(e.target.value));
 
-  // 3. Aircraft Altitude in Feet (500 to 40,000 ft) -> 60 FPS Analytical Update!
+  // 3. Aircraft Altitude in Feet (100 to 40,000 ft) & ASL/AGL Toggle -> 60 FPS Analytical Update!
   const onUavFtChange = (val) => {
     const num = parseFloat(val);
     if (!Number.isFinite(num)) return;
-    state.hUavFt = Math.max(500, Math.min(40000, Math.round(num)));
+    state.hUavFt = Math.max(100, Math.min(40000, Math.round(num)));
     document.getElementById('input-h-uav-ft').value = state.hUavFt;
     document.getElementById('slider-h-uav-ft').value = state.hUavFt;
     updateReadoutsUI();
@@ -614,6 +699,32 @@ function bindUIEvents() {
   };
   document.getElementById('slider-h-uav-ft').addEventListener('input', (e) => onUavFtChange(e.target.value));
   document.getElementById('input-h-uav-ft').addEventListener('change', (e) => onUavFtChange(e.target.value));
+
+  document.getElementById('btn-ref-asl').addEventListener('click', () => {
+    if (state.altRef === 'asl') return;
+    state.altRef = 'asl';
+    document.getElementById('btn-ref-asl').classList.add('active');
+    document.getElementById('btn-ref-agl').classList.remove('active');
+    updateReadoutsUI();
+    triggerFast60FpsUpdate();
+    if (pointLosPopup && map.hasLayer(pointLosPopup)) {
+      const ll = pointLosPopup.getLatLng();
+      requestPointMinLos(ll.lat, ll.lng);
+    }
+  });
+
+  document.getElementById('btn-ref-agl').addEventListener('click', () => {
+    if (state.altRef === 'agl') return;
+    state.altRef = 'agl';
+    document.getElementById('btn-ref-agl').classList.add('active');
+    document.getElementById('btn-ref-asl').classList.remove('active');
+    updateReadoutsUI();
+    triggerFast60FpsUpdate();
+    if (pointLosPopup && map.hasLayer(pointLosPopup)) {
+      const ll = pointLosPopup.getLatLng();
+      requestPointMinLos(ll.lat, ll.lng);
+    }
+  });
 
   // 4. Max Calculation Range (R_max: 10 to 200 km) -> 60 FPS Analytical Update!
   const onRMaxChange = (val) => {
