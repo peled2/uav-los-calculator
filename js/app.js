@@ -139,15 +139,15 @@ function initMap() {
     interactive: false
   }).addTo(map);
 
-  // Draggable Ground Station Marker
+  // Ground Station Marker (locked by default until stationMoveMode is enabled)
   stationMarker = L.marker([state.lat0, state.lon0], {
-    draggable: true,
+    draggable: false,
     icon: L.divIcon({
       className: 'station-marker-wrap',
       iconSize: [36, 36],
       iconAnchor: [18, 18],
       html: `
-        <div class="station-pin" title="תחנה קרקעית (גרור או לחץ במפה להזזה)">
+        <div class="station-pin" title="תחנה קרקעית (לחץ על כפתור 'הזז תחנה' כדי לשנות מיקום)">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/>
             <path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/>
@@ -163,6 +163,7 @@ function initMap() {
   }).addTo(map);
 
   stationMarker.on('drag', (e) => {
+    if (!state.stationMoveMode) return;
     const pos = e.target.getLatLng();
     state.lat0 = pos.lat;
     state.lon0 = pos.lng;
@@ -171,11 +172,13 @@ function initMap() {
   });
 
   stationMarker.on('dragend', () => {
+    if (!state.stationMoveMode) return;
     triggerFullViewshedCalculation();
   });
 
-  // Clicking anywhere on the map places the Ground Station and recalculates 360° LOS
+  // Clicking on the map moves the Ground Station ONLY when stationMoveMode is active
   map.on('click', (e) => {
+    if (!state.stationMoveMode) return;
     state.lat0 = e.latlng.lat;
     state.lon0 = e.latlng.lng;
     stationMarker.setLatLng([state.lat0, state.lon0]);
@@ -505,6 +508,22 @@ function bindUIEvents() {
     state.panelCollapsed = !state.panelCollapsed;
     panelEl.classList.toggle('is-collapsed', state.panelCollapsed);
     toggleBtn.textContent = state.panelCollapsed ? 'הרחב ▾' : 'צמצם ▴';
+  });
+
+  // Toggle Station Move Mode (Lock / Unlock map click & marker drag)
+  const moveBtn = document.getElementById('btn-toggle-move-station');
+  moveBtn.addEventListener('click', () => {
+    state.stationMoveMode = !state.stationMoveMode;
+    moveBtn.classList.toggle('active', state.stationMoveMode);
+    document.body.classList.toggle('station-move-active', state.stationMoveMode);
+
+    if (state.stationMoveMode) {
+      moveBtn.innerHTML = '<span class="move-icon">📍</span><span class="move-label">הזזת תחנה פעילה</span>';
+      if (stationMarker && stationMarker.dragging) stationMarker.dragging.enable();
+    } else {
+      moveBtn.innerHTML = '<span class="move-icon">🔒</span><span class="move-label">הזז תחנה</span>';
+      if (stationMarker && stationMarker.dragging) stationMarker.dragging.disable();
+    }
   });
 
   // Collapse / Expand Bottom Cross-Section Drawer
